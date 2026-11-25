@@ -559,10 +559,10 @@ struct FeedBodyView: View {
                         .textSelection(.enabled)
                 }
                 if !entity.pictures.isEmpty {
-                    FeedImageGrid(pictures: entity.pictures, maxCount: 30)
+                    FeedImageGrid(pictures: entity.pictures, maxCount: 30, source: entity)
                 }
             } else {
-                ArticleBody(parts: parts)
+                ArticleBody(parts: parts, entity: entity)
             }
             if let source = entity.forwardSource {
                 ForwardedFeedView(entity: source)
@@ -659,6 +659,7 @@ struct MarkdownTextView: View {
 /// 图文段落：文字、图片和链接卡片。
 private struct ArticleBody: View {
     let parts: [FeedBodyView.Part]
+    let entity: Entity
 
     @Environment(AppModel.self) private var app
 
@@ -683,7 +684,7 @@ private struct ArticleBody: View {
         let ratio = max(pixel.width / pixel.height, 0.3)
         return VStack(spacing: 6) {
             Button {
-                ImageViewer.show(urls: all, index: all.firstIndex(of: part.url) ?? 0)
+                ImageViewer.show(media: entity.mediaItems(for: all), index: all.firstIndex(of: part.url) ?? 0)
             } label: {
                 Color.clear
                     .aspectRatio(ratio, contentMode: .fit)

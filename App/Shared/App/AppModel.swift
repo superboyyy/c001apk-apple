@@ -78,6 +78,9 @@ final class AppModel {
             .flatMap { try? JSONDecoder().decode(CoolapkClient.SessionCookie.self, from: $0) }
         client = CoolapkClient(identity: identity, account: account, sessionCookie: session)
 
+        LivePhotoLoader.resolver = { [client] media in
+            try? await client.livePhotoVideoURL(for: media)
+        }
         client.onSessionCookieChange = { cookie in
             if let cookie, let data = try? JSONEncoder().encode(cookie) {
                 UserDefaults.standard.set(data, forKey: Self.sessionKey)

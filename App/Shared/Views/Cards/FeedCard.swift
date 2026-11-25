@@ -32,7 +32,7 @@ struct FeedCard: View {
                     .foregroundStyle(isArticle ? .secondary : .primary)
             }
             if !isArticle, !entity.pictures.isEmpty {
-                FeedImageGrid(pictures: entity.pictures)
+                FeedImageGrid(pictures: entity.pictures, source: entity)
             }
             if let source = entity.forwardSource {
                 ForwardedFeedView(entity: source)
@@ -134,6 +134,16 @@ struct CoverImage: View {
 struct FeedImageGrid: View {
     let pictures: [String]
     var maxCount = 9
+    /// 图片所属的帖子或回复；有它才能识别实况并解析视频。
+    var source: Entity?
+
+    private func openViewer(at index: Int) {
+        if let source {
+            ImageViewer.show(media: source.mediaItems(for: pictures), index: index)
+        } else {
+            ImageViewer.show(urls: pictures, index: index)
+        }
+    }
 
     @Environment(AppModel.self) private var app
     @Environment(\.masonryColumnWidth) private var masonryColumnWidth
@@ -164,7 +174,7 @@ struct FeedImageGrid: View {
             : min(max(size.width / size.height, 0.56), 2.4)
         let isLong = size.height / size.width > 2.4
         return Button {
-            ImageViewer.show(urls: pictures, index: 0)
+            openViewer(at: 0)
         } label: {
             Color.clear
                 .aspectRatio(ratio, contentMode: .fit)
@@ -230,7 +240,7 @@ struct ForwardedFeedView: View {
                 html: "<a href=\"/u/\(entity.uid)\">@\(name)</a>: " + (entity.messageTitle.isEmpty ? entity.message : entity.messageTitle),
                 fontSize: app.settings.fontSize - 1, lineLimit: 6)
             if !entity.pictures.isEmpty {
-                FeedImageGrid(pictures: entity.pictures, maxCount: 3)
+                FeedImageGrid(pictures: entity.pictures, maxCount: 3, source: entity)
             }
         }
         .padding(10)

@@ -70,7 +70,7 @@ struct ReplyCard: View {
                 RichTextView(html: messageHTML, fontSize: app.settings.fontSize)
                 let pictures = entity.pictures.isEmpty && !entity.pic.isEmpty ? [entity.pic] : entity.pictures
                 if !pictures.isEmpty {
-                    FeedImageGrid(pictures: pictures).frame(maxWidth: 320, alignment: .leading)
+                    FeedImageGrid(pictures: pictures, source: entity).frame(maxWidth: 320, alignment: .leading)
                 }
                 if style == .inFeed, !entity.replyRows.isEmpty {
                     nestedReplies

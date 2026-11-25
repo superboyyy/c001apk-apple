@@ -11,8 +11,12 @@ struct LivePhotoVideo: Sendable {
     let fileURL: URL
 }
 
-/// 取得一张实况图的视频：优先用元数据里的视频地址，否则取原图里内嵌的视频（Motion Photo）。
+/// 取得一张实况图的视频：依次尝试元数据里的视频地址、酷安的实况解析接口、
+/// 原图里内嵌的视频（Motion Photo）。
 enum LivePhotoLoader {
+    /// 向酷安解析实况视频地址，由 `AppModel` 在启动时注入（查看器拿不到客户端）。
+    @MainActor static var resolver: (@Sendable (FeedMedia) async -> URL?)?
+
     /// 临时目录在每次启动后首次使用时清空，避免残留上次的视频。
     private static let directory: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("c001apk-live", isDirectory: true)
@@ -24,6 +28,11 @@ enum LivePhotoLoader {
     /// - Parameter imageData: 已下载的原图字节，用于查找内嵌视频。
     static func video(for media: FeedMedia, imageData: Data?) async -> LivePhotoVideo? {
         if let raw = media.videoURL, let url = ImageURL.normalized(raw),
+           let data = try? await ImagePipeline.shared.data(for: url), !data.isEmpty {
+            return store(data, fileExtension: fileExtension(for: url, data: data))
+        }
+        if media.videoURL == nil, let resolver = await resolver, let resolved = await resolver(media),
+           let url = ImageURL.normalized(resolved.absoluteString),
            let data = try? await ImagePipeline.shared.data(for: url), !data.isEmpty {
             return store(data, fileExtension: fileExtension(for: url, data: data))
         }

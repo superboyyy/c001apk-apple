@@ -10,6 +10,20 @@ let useAPI2 = arguments.contains("--api2")
 let summary = arguments.contains("--summary")
 let useWeb = arguments.contains("--web")
 arguments.removeAll { $0.hasPrefix("--") }
+// 调试实况：coolapk-probe --live <图片地址> <内容编号> [feed|reply|article]
+if CommandLine.arguments.contains("--live"), arguments.count >= 2 {
+    var media = FeedMedia(url: arguments[0], contentID: arguments[1],
+                          contentType: MediaContentType(rawValue: arguments.count > 2 ? arguments[2] : "feed") ?? .feed)
+    media.isLivePhoto = true
+    let client = CoolapkClient(identity: ClientIdentity(deviceCode: ProcessInfo.processInfo.environment["COOLAPK_DEVICE"] ?? ""))
+    do {
+        print(try await client.livePhotoVideoURL(for: media)?.absoluteString ?? "nil")
+    } catch {
+        print("error:", error)
+    }
+    exit(0)
+}
+
 guard let path = arguments.first else {
     FileHandle.standardError.write(Data("usage: coolapk-probe <path> [key=value …] [--api2] [--summary]\n".utf8))
     exit(2)

@@ -6,18 +6,18 @@ import UIKit
 @MainActor
 enum ImageViewer {
     static func show(urls: [String], index: Int) {
-        let valid = urls.filter { ImageURL.normalized($0) != nil }
+        show(media: urls.map { FeedMedia(url: $0) }, index: index)
+    }
+
+    /// 带素材元数据的入口：能识别实况并播放视频。
+    static func show(media: [FeedMedia], index: Int) {
+        let valid = media.filter { ImageURL.normalized($0.originalURL) != nil }
         guard !valid.isEmpty, let presenter = topViewController() else { return }
-        let start = urls.indices.contains(index) ? (valid.firstIndex(of: urls[index]) ?? 0) : 0
-        let host = UIHostingController(rootView: ImageViewerScreen(urls: valid, index: start))
+        let start = media.indices.contains(index) ? (valid.firstIndex(of: media[index]) ?? 0) : 0
+        let host = UIHostingController(rootView: ImageViewerScreen(items: valid, index: start))
         host.modalPresentationStyle = .fullScreen
         host.view.backgroundColor = .black
         presenter.present(host, animated: true)
-    }
-
-    /// 带素材元数据的入口：与 macOS 查看器同名，这里取每项的原图地址。
-    static func show(media: [FeedMedia], index: Int) {
-        show(urls: media.map(\.originalURL), index: index)
     }
 
     /// 当前最上层的视图控制器，用来弹出查看器。
@@ -34,8 +34,14 @@ enum ImageViewer {
 
 /// 查看器界面：横向翻页 + 底部玻璃控制条。
 private struct ImageViewerScreen: View {
-    let urls: [String]
+    let items: [FeedMedia]
     @State var index: Int
+
+    private var urls: [String] { items.map(\.originalURL) }
+    /// 当前页的实况播放器；翻页时换成新一页的视频。
+    @State private var playback = LivePhotoPlayback()
+    @State private var liveVideo: LivePhotoVideo?
+    @State private var liveTask: Task<Void, Never>?
 
     @Environment(\.dismiss) private var dismiss
     @State private var images: [Int: UIImage] = [:]
@@ -51,6 +57,12 @@ private struct ImageViewerScreen: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
+        }
+        .onChange(of: index, initial: true) { _, _ in loadLiveVideo() }
+        .onDisappear {
+            liveTask?.cancel()
+            playback.stop()
+            if let liveVideo { LivePhotoLoader.discard(liveVideo) }
         }
         .overlay(alignment: .topLeading) {
             Button {
@@ -71,6 +83,10 @@ private struct ImageViewerScreen: View {
     private func page(_ position: Int) -> some View {
         if let image = images[position] {
             ZoomableImageView(image: image)
+                .overlay {
+                    // 实况视频叠在静态图上，只在当前页播放。
+                    if position == index { LivePhotoPlayerView(playback: playback) }
+                }
         } else if failed.contains(position) {
             Text("图片加载失败").foregroundStyle(.secondary)
         } else {
@@ -81,10 +97,32 @@ private struct ImageViewerScreen: View {
                     if let data = try? await ImagePipeline.shared.data(for: url),
                        let decoded = HDRImage.platformImage(from: data, allowHDR: !AppSettings.isHDRDisabled) {
                         images[position] = decoded.image
+                        if position == index { loadLiveVideo() }
                     } else {
                         failed.insert(position)
                     }
                 }
+        }
+    }
+
+    /// 取当前页的实况视频；按设置自动播放一次。
+    private func loadLiveVideo() {
+        liveTask?.cancel()
+        playback.load(nil)
+        if let liveVideo { LivePhotoLoader.discard(liveVideo) }
+        liveVideo = nil
+        let position = index
+        guard items.indices.contains(position), items[position].isLivePhoto, images[position] != nil else { return }
+        let item = items[position]
+        liveTask = Task {
+            guard let video = await LivePhotoLoader.video(for: item, imageData: nil) else { return }
+            guard !Task.isCancelled, position == index else {
+                LivePhotoLoader.discard(video)
+                return
+            }
+            liveVideo = video
+            playback.load(video.fileURL)
+            if AppSettings.autoPlaysLivePhotos { playback.playOnce() }
         }
     }
 
@@ -93,6 +131,24 @@ private struct ImageViewerScreen: View {
             if urls.count > 1 {
                 Text("\(index + 1) / \(urls.count)")
                     .font(.system(size: 13, weight: .medium).monospacedDigit())
+            }
+            if items[index].isLivePhoto {
+                if playback.hasVideo {
+                    Button {
+                        playback.toggleLoop()
+                    } label: {
+                        Image(systemName: playback.state == .looping ? "stop.fill" : "livephoto.play")
+                    }
+                    .accessibilityLabel(playback.state == .looping ? "停止播放实况" : "循环播放实况")
+                    Button {
+                        playback.isMuted.toggle()
+                    } label: {
+                        Image(systemName: playback.isMuted ? "speaker.slash" : "speaker.wave.2")
+                    }
+                    .accessibilityLabel(playback.isMuted ? "打开声音" : "静音")
+                } else {
+                    Label("实况", systemImage: "livephoto").font(.system(size: 13, weight: .medium))
+                }
             }
             if let image = images[index] {
                 Button {
