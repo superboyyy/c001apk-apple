@@ -16,7 +16,12 @@ struct RootView: View {
         app.isShowingSettings = true
         #endif
     }
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// 侧边栏上次是否收起，下次启动时沿用。
+    @AppStorage(Self.sidebarCollapsedKey) private var sidebarCollapsed = false
+    @State private var columnVisibility: NavigationSplitViewVisibility =
+        UserDefaults.standard.bool(forKey: RootView.sidebarCollapsedKey) ? .detailOnly : .all
+
+    private static let sidebarCollapsedKey = "sidebarCollapsed"
 
     private var isRailVisible: Bool { columnVisibility == .detailOnly }
     private var railInset: CGFloat { isRailVisible ? SidebarRail.width : 0 }
@@ -79,6 +84,9 @@ struct RootView: View {
         // 整个窗口共用一层背景，作为窗口自身的背景绘制，
         // 这样总能延伸到标题栏和每个页面之下。
         .windowBackdrop { AppBackdrop() }
+        .onChange(of: columnVisibility) { _, visibility in
+            sidebarCollapsed = visibility == .detailOnly
+        }
         // 侧边栏隐藏时，用悬浮的图标栏保证每个页面仍一键可达。
         // 它位于分栏视图之上，推入的页面也能看到；页面通过左侧安全区给它让位。
         .overlay(alignment: .topLeading) {
