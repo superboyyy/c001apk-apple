@@ -157,10 +157,20 @@ struct FeedImageGrid: View {
         } else {
             let shown = Array(pictures.prefix(fillsWidth ? min(maxCount, MasonryMetrics.maxGridPictures) : maxCount))
             let columnCount = MasonryMetrics.gridColumns(pictures.count)
-            let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: columnCount)
-            LazyVGrid(columns: columns, spacing: 5) {
-                ForEach(Array(shown.enumerated()), id: \.offset) { index, picture in
-                    cell(picture, index: index, extra: index == shown.count - 1 ? pictures.count - shown.count : 0)
+            // 最多九格，不需要懒加载网格；它放在懒加载列表里还会让两层互相牵制。
+            VStack(spacing: 5) {
+                ForEach(Array(stride(from: 0, to: shown.count, by: columnCount)), id: \.self) { start in
+                    HStack(spacing: 5) {
+                        ForEach(start..<start + columnCount, id: \.self) { index in
+                            if index < shown.count {
+                                cell(shown[index], index: index,
+                                     extra: index == shown.count - 1 ? pictures.count - shown.count : 0)
+                            } else {
+                                // 末行不满时占位，保持每格等宽。
+                                Color.clear.aspectRatio(1, contentMode: .fit)
+                            }
+                        }
+                    }
                 }
             }
             .frame(maxWidth: fillsWidth ? .infinity : (columnCount == 2 ? 420 : 520), alignment: .leading)
@@ -179,7 +189,8 @@ struct FeedImageGrid: View {
             Color.clear
                 .aspectRatio(ratio, contentMode: .fit)
                 .overlay {
-                    RemoteImage(picture, variant: app.settings.highQualityThumbnails ? .medium : .small, maxPixel: 1400)
+                    RemoteImage(picture, variant: app.settings.highQualityThumbnails ? .medium : .small,
+                                maxPixel: fillsWidth ? 1000 : 1400)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(alignment: .bottomTrailing) { marks(picture, isLong: isLong) }
@@ -199,12 +210,13 @@ struct FeedImageGrid: View {
             Color.clear
                 .aspectRatio(1, contentMode: .fit)
                 .overlay {
-                    RemoteImage(picture, variant: app.settings.highQualityThumbnails ? .small : .square, maxPixel: 600)
+                    RemoteImage(picture, variant: app.settings.highQualityThumbnails ? .small : .square,
+                                maxPixel: fillsWidth ? 400 : 600)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(alignment: .bottomTrailing) {
                     if extra > 0 {
-                        GlassBadge(text: "+\(extra)").padding(5)
+                        ImageBadge(text: "+\(extra)").padding(5)
                     } else {
                         marks(picture, isLong: isLong)
                     }
@@ -217,9 +229,9 @@ struct FeedImageGrid: View {
     @ViewBuilder
     private func marks(_ picture: String, isLong: Bool) -> some View {
         if ImageURL.isGIF(picture) {
-            GlassBadge(text: "GIF").padding(5)
+            ImageBadge(text: "GIF").padding(5)
         } else if isLong {
-            GlassBadge(text: "长图").padding(5)
+            ImageBadge(text: "长图").padding(5)
         } else {
             // 实况 / HDR 角标（按文件名里的标记判断）。
             MediaBadges(url: picture).padding(5)
@@ -319,31 +331,38 @@ struct FeedTagRow: View {
     var body: some View {
         let items = chips
         if !items.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, chip in
-                        Button {
-                            navigator.open(chip.url, title: chip.title, app: app)
-                        } label: {
-                            HStack(spacing: 4) {
-                                if !chip.logo.isEmpty {
-                                    RemoteImage(chip.logo, maxPixel: 64)
-                                        .frame(width: 16, height: 16)
-                                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                                }
-                                Text(chip.title).font(.system(size: 11, weight: .medium)).lineLimit(1)
-                            }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .foregroundStyle(.primary.opacity(0.8))
-                            .contentShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .glassChip()
-                    }
-                }
+            // 放得下就直接排开：每个横向滚动视图背后都是一个系统滚动视图，列表里很重。
+            ViewThatFits(in: .horizontal) {
+                row(items)
+                ScrollView(.horizontal, showsIndicators: false) { row(items) }
             }
         }
+    }
+
+    private func row(_ items: [(title: String, url: String, logo: String)]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, chip in
+                Button {
+                    navigator.open(chip.url, title: chip.title, app: app)
+                } label: {
+                    HStack(spacing: 4) {
+                        if !chip.logo.isEmpty {
+                            RemoteImage(chip.logo, maxPixel: 64)
+                                .frame(width: 16, height: 16)
+                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        }
+                        Text(chip.title).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .foregroundStyle(.primary.opacity(0.8))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .glassChip()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

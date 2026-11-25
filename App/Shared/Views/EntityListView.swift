@@ -26,11 +26,17 @@ struct EntityListView<Header: View>: View {
     @State private var position = ScrollPosition(edge: .top)
     /// 滚动状态；放在引用类型里，更新它不会触发界面重算。
     @State private var scroll = ScrollOffsetBox()
+    /// 瀑布流分列的缓存，同样不参与界面重算。
+    @State private var lanes = MasonryLanes()
+    /// 距离底部不远了，该加载下一页。
+    @State private var isNearBottom = false
 
     private static var gutter: CGFloat { 12 }
     private static var horizontalPadding: CGFloat { 16 }
     /// 卡片的最小舒适宽度；窗口能放几列就放几列。
     private static var minimumColumnWidth: CGFloat { 280 }
+    /// 距底部多远时开始加载下一页。
+    private static var preloadDistance: CGFloat { 1500 }
 
     private var columns: Int {
         switch layout {
@@ -120,45 +126,23 @@ struct EntityListView<Header: View>: View {
         }
     }
 
-    private enum Segment: Identifiable {
-        case full(Entity)
-        case flow([Entity])
-        var id: UUID {
-            switch self {
-            case .full(let entity): return entity.id
-            case .flow(let entities): return entities[0].id
-            }
-        }
-    }
-
     private var visibleItems: [Entity] {
         let library = app.library
         let filter = app.contentFilter
         return model.items.filter { !library.isBlocked(uid: $0.uid) && !filter.shouldHide($0) }
     }
 
-    /// 开头的推广卡片（横幅、快捷入口）横跨整页。第一条普通内容之后的所有
-    /// 条目（包括后面的卡片）都进入瀑布流，避免整宽卡片在短列下方留出空白。
-    private var segments: [Segment] {
-        var result: [Segment] = []
-        var run: [Entity] = []
-        let waterfall = columns > 1
-        for entity in visibleItems {
-            let isCard = entity.entityType == "card" || entity.entityTemplate == "time"
-            if isCard, !(waterfall && !run.isEmpty) {
-                if !run.isEmpty { result.append(.flow(run)); run = [] }
-                result.append(.full(entity))
-            } else {
-                run.append(entity)
-            }
-        }
-        if !run.isEmpty { result.append(.flow(run)) }
-        return result
+    /// 多列时开头的推广卡片（横幅、快捷入口）横跨整页，其余条目（包括后面的卡片）
+    /// 都进入瀑布流，避免整宽卡片在短列下方留出空白。
+    private func leadingCardCount(in items: [Entity]) -> Int {
+        items.prefix { $0.entityType == "card" || $0.entityTemplate == "time" }.count
     }
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
+            // 外层不用懒加载：懒加载栈套懒加载栈时，两层互相依赖对方估算的高度，
+            // 滚到底部附近会陷入无休止的重排，把主线程卡死。
+            VStack(spacing: 12) {
                 header()
                 if !hidesContent { content }
             }
@@ -191,6 +175,15 @@ struct EntityListView<Header: View>: View {
         }
         .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 900 } action: { _, value in
             withAnimation(.smooth(duration: 0.2)) { showsTopButton = value }
+        }
+        // 离底部还有一段距离就开始加载下一页，连续滚动时不必等到见底。
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.containerSize.height > geometry.contentSize.height - Self.preloadDistance
+        } action: { _, value in
+            isNearBottom = value
+        }
+        .task(id: MoreTrigger(isNearBottom: isNearBottom, count: model.items.count, isLoading: model.isLoadingMore)) {
+            if isNearBottom, !hidesContent { model.requestMore() }
         }
         .overlay(alignment: .bottomTrailing) {
             if showsTopButton {
@@ -241,54 +234,42 @@ struct EntityListView<Header: View>: View {
             }
             .frame(minHeight: 240)
         case .loaded:
-            ForEach(segments) { segment in
-                switch segment {
-                case .full(let entity):
-                    tracked(entity)
-                case .flow(let entities):
-                    flow(entities)
+            let items = visibleItems
+            if columns <= 1 {
+                LazyVStack(spacing: 12) {
+                    ForEach(items) { tracked($0) }
                 }
+            } else {
+                let leading = leadingCardCount(in: items)
+                if leading > 0 {
+                    // 与瀑布流并列（不是嵌套）的懒加载栈：滚过去之后这些卡片可以被回收。
+                    LazyVStack(spacing: 12) {
+                        ForEach(items.prefix(leading)) { tracked($0) }
+                    }
+                }
+                if leading < items.count { flow(Array(items.dropFirst(leading))) }
             }
             footer
         }
     }
 
-    /// 瀑布流：按估算高度把每张卡片放进当前最短的一列。
-    /// 追加数据不会移动已有卡片。
-    private func distribute(_ entities: [Entity], into count: Int, width: CGFloat) -> [[Entity]] {
-        var result = Array(repeating: [Entity](), count: count)
-        var heights = Array(repeating: CGFloat(0), count: count)
-        let fontSize = app.settings.fontSize
-        let showsReply = app.settings.showReplyPreview
-        for entity in entities {
-            var target = 0
-            for index in 1..<count where heights[index] < heights[target] - 0.5 { target = index }
-            result[target].append(entity)
-            heights[target] += MasonryMetrics.estimatedHeight(
-                of: entity, columnWidth: width, fontSize: fontSize, showsReplyPreview: showsReply) + Self.gutter
-        }
-        return result
-    }
-
-    @ViewBuilder
+    /// 瀑布流：每列一个懒加载栈，卡片的归属见 `MasonryLanes`。
     private func flow(_ entities: [Entity]) -> some View {
-        let count = columns
-        if count <= 1 {
-            ForEach(entities) { tracked($0) }
-        } else {
-            // 估高用固定的名义宽度，卡片归属只随列数变化，不随实时宽度抖动。
-            let width = MasonryMetrics.nominalColumnWidth
-            let lanes = distribute(entities, into: count, width: width)
-            HStack(alignment: .top, spacing: Self.gutter) {
-                ForEach(0..<count, id: \.self) { lane in
-                    LazyVStack(spacing: Self.gutter) {
-                        ForEach(lanes[lane]) { tracked($0) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .top)
+        // 估高用固定的名义宽度，卡片归属只随列数变化，不随实时宽度抖动。
+        let width = MasonryMetrics.nominalColumnWidth
+        let style = MasonryLanes.Style(columns: columns, columnWidth: width, spacing: Self.gutter,
+                                       fontSize: app.settings.fontSize,
+                                       showsReplyPreview: app.settings.showReplyPreview)
+        let columns = lanes.distribute(entities, style: style)
+        return HStack(alignment: .top, spacing: Self.gutter) {
+            ForEach(columns.indices, id: \.self) { lane in
+                LazyVStack(spacing: Self.gutter) {
+                    ForEach(columns[lane]) { tracked($0) }
                 }
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .environment(\.masonryColumnWidth, width)
         }
+        .environment(\.masonryColumnWidth, width)
     }
 
     @ViewBuilder
@@ -305,9 +286,7 @@ struct EntityListView<Header: View>: View {
             } else if model.reachedEnd {
                 Text("没有更多了").font(.callout).foregroundStyle(.tertiary)
             } else {
-                ProgressView()
-                    .controlSize(.small)
-                    .task(id: model.items.count) { model.requestMore() }
+                ProgressView().controlSize(.small)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 56)
@@ -355,6 +334,53 @@ final class ScrollOffsetBox {
         guard isReflowing, !reflowStartedNearTop, id == anchorID else { return nil }
         let target = minY - anchorDelta
         return abs(target - offset) > 0.5 ? target : nil
+    }
+}
+
+/// 触发加载下一页的条件；任何一项变化都重新判断一次。
+private struct MoreTrigger: Equatable {
+    var isNearBottom: Bool
+    var count: Int
+    var isLoading: Bool
+}
+
+/// 瀑布流的分列结果：按估算高度把每张卡片放进当前最短的一列。
+/// 追加数据不会移动已有卡片，所以只需为新增的卡片估高。
+final class MasonryLanes {
+    struct Style: Equatable {
+        var columns: Int
+        var columnWidth: CGFloat
+        var spacing: CGFloat
+        var fontSize: CGFloat
+        var showsReplyPreview: Bool
+    }
+
+    private var style: Style?
+    private var ids: [UUID] = []
+    /// 各列里卡片在列表中的下标。
+    private var lanes: [[Int]] = []
+    private var heights: [CGFloat] = []
+
+    func distribute(_ entities: [Entity], style: Style) -> [[Entity]] {
+        let isAppend = style == self.style && entities.count >= ids.count
+            && zip(entities, ids).allSatisfy { $0.id == $1 }
+        if !isAppend {
+            self.style = style
+            ids = []
+            lanes = Array(repeating: [], count: style.columns)
+            heights = Array(repeating: 0, count: style.columns)
+        }
+        for index in ids.count..<entities.count {
+            let entity = entities[index]
+            var target = 0
+            for lane in 1..<style.columns where heights[lane] < heights[target] - 0.5 { target = lane }
+            lanes[target].append(index)
+            heights[target] += MasonryMetrics.estimatedHeight(
+                of: entity, columnWidth: style.columnWidth, fontSize: style.fontSize,
+                showsReplyPreview: style.showsReplyPreview) + style.spacing
+            ids.append(entity.id)
+        }
+        return lanes.map { $0.map { entities[$0] } }
     }
 }
 

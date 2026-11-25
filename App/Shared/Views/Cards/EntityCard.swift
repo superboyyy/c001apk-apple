@@ -263,7 +263,7 @@ struct ImageSquareScrollCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 8) {
+                    HStack(spacing: 8) {
                         ForEach(items) { item in
                             CardLink(url: item.url, title: item.title) {
                                 RemoteImage(item.pic, maxPixel: 400)
@@ -271,7 +271,7 @@ struct ImageSquareScrollCard: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                     .overlay(alignment: .bottomLeading) {
                                         if !item.title.isEmpty {
-                                            GlassBadge(text: item.title).padding(5)
+                                            ImageBadge(text: item.title).padding(5)
                                         }
                                     }
                             }
@@ -296,7 +296,7 @@ struct ImageTextScrollCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 10) {
+                    HStack(alignment: .top, spacing: 10) {
                         ForEach(items) { item in
                             let title = item.messageTitle.isEmpty ? item.title : item.messageTitle
                             CardLink(url: item.url, title: title) {

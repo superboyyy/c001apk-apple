@@ -40,8 +40,9 @@ struct GlassTabBar<Item: Hashable>: View {
     }
 }
 
-/// 浮在图片上的 Liquid Glass 小标签（计数、GIF 标记等）。
-struct GlassBadge: View {
+/// 浮在图片上的小标签（计数、GIF、实况等）。信息流里数量很多，而每块 Liquid Glass
+/// 在滚动时都要逐帧重算，所以这里用半透明底色。
+struct ImageBadge: View {
     let text: String
     var systemImage: String?
 
@@ -54,7 +55,8 @@ struct GlassBadge: View {
         .font(.system(size: 10, weight: .semibold))
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .glassEffect(.regular, in: .capsule)
+        .foregroundStyle(.white)
+        .background(.black.opacity(0.5), in: Capsule())
     }
 }
 

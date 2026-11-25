@@ -4,7 +4,7 @@ import SwiftUI
 /// 缩略图上的“实况”角标。
 struct LivePhotoBadge: View {
     var body: some View {
-        GlassBadge(text: "实况", systemImage: "livephoto")
+        ImageBadge(text: "实况", systemImage: "livephoto")
             .accessibilityLabel("实况图片")
     }
 }
@@ -12,7 +12,7 @@ struct LivePhotoBadge: View {
 /// 缩略图上的“HDR”角标。
 struct HDRBadge: View {
     var body: some View {
-        GlassBadge(text: "HDR")
+        ImageBadge(text: "HDR")
             .accessibilityLabel("HDR 图片")
     }
 }
@@ -32,11 +32,9 @@ struct MediaBadges: View {
 
     var body: some View {
         if media.isLivePhoto || media.isHDR {
-            GlassEffectContainer(spacing: 4) {
-                HStack(spacing: 4) {
-                    if media.isLivePhoto { LivePhotoBadge() }
-                    if media.isHDR { HDRBadge() }
-                }
+            HStack(spacing: 4) {
+                if media.isLivePhoto { LivePhotoBadge() }
+                if media.isHDR { HDRBadge() }
             }
         }
     }
