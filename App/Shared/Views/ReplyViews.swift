@@ -48,13 +48,15 @@ struct ReplyCard: View {
     private var isAuthor: Bool { !entity.uid.isEmpty && entity.uid == entity.feedUID }
 
     var body: some View {
+        let avatarZoomID = style == .thread ? nil : "\(entity.id.uuidString)#reply-author"
         HStack(alignment: .top, spacing: 10) {
             Button {
-                if !entity.uid.isEmpty { navigator.push(.user(entity.uid)) }
+                if !entity.uid.isEmpty { navigator.push(.user(entity.uid), zoomID: avatarZoomID) }
             } label: {
                 AvatarView(url: entity.userAvatar, size: 32)
             }
             .buttonStyle(.plain)
+            .zoomTransitionSource(id: avatarZoomID, cornerRadius: 16)
             .accessibilityLabel("\(entity.username) 的主页")
 
             VStack(alignment: .leading, spacing: 6) {
@@ -67,8 +69,16 @@ struct ReplyCard: View {
                     Text(Formatting.relative(entity.dateline))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-                RichTextView(html: messageHTML, fontSize: app.settings.fontSize)
-                let pictures = entity.pictures.isEmpty && !entity.pic.isEmpty ? [entity.pic] : entity.pictures
+                let pictures = entity.replyPictures
+                let html = messageHTML(hidingStandalonePhoto: !pictures.isEmpty)
+                let openStandalone: (() -> Void)? = style == .standalone ? {
+                    guard let feedID = entity["fid"].text, feedID != "0" else { return }
+                    navigator.openCard(.feed(id: feedID), zoomID: entity.id.uuidString)
+                } : nil
+                if !html.isEmpty {
+                    RichTextView(html: html, fontSize: app.settings.fontSize, mediaSource: entity,
+                                 fallbackPictures: pictures, onCardTap: openStandalone)
+                }
                 if !pictures.isEmpty {
                     FeedImageGrid(pictures: pictures, source: entity).frame(maxWidth: 320, alignment: .leading)
                 }
@@ -79,12 +89,10 @@ struct ReplyCard: View {
             }
         }
         .padding(style == .standalone ? 0 : 4)
-        .modifier(StandaloneCard(enabled: style == .standalone))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard style == .standalone, let feedID = entity["fid"].text, feedID != "0" else { return }
-            navigator.openCard(.feed(id: feedID))
-        }
+        .modifier(StandaloneCard(enabled: style == .standalone, zoomID: entity.id.uuidString) {
+            guard let feedID = entity["fid"].text, feedID != "0" else { return }
+            navigator.openCard(.feed(id: feedID), zoomID: entity.id.uuidString)
+        })
         .contextMenu {
             Button("拷贝内容") { Platform.copy(RichText.plainText(entity.message)) }
             if !entity.uid.isEmpty {
@@ -96,11 +104,14 @@ struct ReplyCard: View {
         }
     }
 
-    private var messageHTML: String {
+    private func messageHTML(hidingStandalonePhoto: Bool) -> String {
+        let trimmed = entity.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = (hidingStandalonePhoto && trimmed == "[图片]") ? "" : entity.message
         if style == .thread, !entity.replyUsername.isEmpty {
-            return "回复 <a href=\"/u/\(entity.replyUID)\">@\(RichText.escape(entity.replyUsername))</a>: " + entity.message
+            let prefix = "回复 <a href=\"/u/\(entity.replyUID)\">@\(RichText.escape(entity.replyUsername))</a>"
+            return body.isEmpty ? prefix : "\(prefix): \(body)"
         }
-        return entity.message
+        return body
     }
 
     private func badge(_ text: String) -> some View {
@@ -113,14 +124,9 @@ struct ReplyCard: View {
     }
 
     private var nestedReplies: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(entity.replyRows.prefix(3)) { row in
-                let target = row.replyUsername.isEmpty || row.replyUID == entity.uid
-                    ? "" : " 回复 <a href=\"/u/\(row.replyUID)\">\(RichText.escape(row.replyUsername))</a>"
-                RichTextView(
-                    html: "<a href=\"/u/\(row.uid)\">\(RichText.escape(row.username))</a>\(target): \(row.message)"
-                        + (row.pic.isEmpty ? "" : " [图片]"),
-                    fontSize: app.settings.fontSize - 1, lineLimit: 3)
+                nestedReplyRow(row)
             }
             let total = max(entity.replyCount, entity.replyRows.count + entity.replyRowsMore)
             if total > min(entity.replyRows.count, 3) {
@@ -140,6 +146,28 @@ struct ReplyCard: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func nestedReplyRow(_ row: Entity) -> some View {
+        let pictures = row.replyPictures
+        let target = row.replyUsername.isEmpty || row.replyUID == entity.uid
+            ? "" : " 回复 <a href=\"/u/\(row.replyUID)\">\(RichText.escape(row.replyUsername))</a>"
+        let prefix = "<a href=\"/u/\(row.uid)\">\(RichText.escape(row.username))</a>\(target)"
+        let trimmed = row.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let messageOnlyPhoto = !pictures.isEmpty && (trimmed.isEmpty || trimmed == "[图片]")
+
+        return VStack(alignment: .leading, spacing: 4) {
+            RichTextView(
+                html: messageOnlyPhoto ? "\(prefix):" : "\(prefix): \(row.message)",
+                fontSize: app.settings.fontSize - 1,
+                lineLimit: 3,
+                mediaSource: row,
+                fallbackPictures: pictures
+            )
+            if !pictures.isEmpty {
+                ReplyImageButton(pictures: pictures, source: row)
+            }
+        }
     }
 
     private var footer: some View {
@@ -191,12 +219,52 @@ struct ReplyCard: View {
     }
 }
 
+/// 楼中楼 / 热评预览里的“查看图片”按钮：直接打开查看器（支持多图与实况元数据）。
+struct ReplyImageButton: View {
+    let pictures: [String]
+    var source: Entity?
+    var fontSize: CGFloat = 12
+
+    @Environment(Navigator.self) private var navigator: Navigator?
+
+    var body: some View {
+        Button {
+            navigator?.noteLinkActivated()
+            if let source {
+                ImageViewer.show(media: source.mediaItems(for: pictures), index: 0)
+            } else {
+                ImageViewer.show(urls: pictures, index: 0)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "photo")
+                    .font(.system(size: fontSize - 0.5, weight: .medium))
+                Text(pictures.count > 1 ? "查看图片 (\(pictures.count))" : "查看图片")
+                    .font(.system(size: fontSize, weight: .medium))
+            }
+            .foregroundStyle(Color.brand)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3.5)
+            .background(Color.brand.opacity(0.10), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pictures.count > 1 ? "查看 \(pictures.count) 张图片" : "查看图片")
+    }
+}
+
 private struct StandaloneCard: ViewModifier {
     let enabled: Bool
+    let zoomID: String
+    let onTap: () -> Void
 
     func body(content: Content) -> some View {
         if enabled {
-            content.card(padding: 12, interactive: true)
+            content
+                .card(padding: 12, interactive: true)
+                .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .onTapGesture(perform: onTap)
+                .zoomTransitionSource(id: zoomID)
         } else {
             content
         }
@@ -209,6 +277,7 @@ struct ReplyThreadSheet: View {
     let onReply: (Entity) -> Void
 
     @Environment(AppModel.self) private var app
+    @Environment(Navigator.self) private var navigator
     @Environment(\.dismiss) private var dismiss
     @State private var model: PagedList?
 
@@ -236,6 +305,12 @@ struct ReplyThreadSheet: View {
                 })
             }
         }
+        .environment(\.openURL, OpenURLAction { url in
+            guard let href = RichText.href(from: url) else { return .systemAction }
+            navigator.noteLinkActivated()
+            navigator.open(href, app: app)
+            return .handled
+        })
         .frame(width: 600, height: 620)
         .task {
             guard model == nil else { return }

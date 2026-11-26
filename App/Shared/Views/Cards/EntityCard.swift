@@ -14,7 +14,7 @@ struct EntityCard: View {
         case "user":
             UserRow(entity: entity)
         case "contacts":
-            UserRow(entity: entity.userInfo ?? Entity(entity["fUserInfo"]))
+            UserRow(entity: entity.userInfo ?? Entity(entity["fUserInfo"]), zoomSourceID: entity.id.uuidString)
         case "topic", "product", "productBrand", "collection", "feedRelation":
             TopicRow(entity: entity)
         case "apk":
@@ -73,6 +73,10 @@ struct EntityCard: View {
 private struct CardLink<Label: View>: View {
     let url: String
     let title: String
+    var zoomID: String? = nil
+    var cornerRadius: CGFloat = 14
+    var appliesZoomSource = true
+    var onBeforeOpen: (() -> Void)? = nil
     @ViewBuilder var label: () -> Label
 
     @Environment(AppModel.self) private var app
@@ -80,11 +84,14 @@ private struct CardLink<Label: View>: View {
 
     var body: some View {
         Button {
-            navigator.open(url, title: title, app: app)
+            onBeforeOpen?()
+            navigator.open(url, title: title, app: app, zoomID: zoomID)
         } label: {
-            label().contentShape(Rectangle())
+            label()
+                .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: appliesZoomSource ? zoomID : nil, cornerRadius: cornerRadius)
         .accessibilityLabel(title)
     }
 }
@@ -97,12 +104,13 @@ private struct CardTitle: View {
 
     var body: some View {
         if !entity.title.isEmpty {
+            let moreZoomID = "\(entity.id.uuidString)#more"
             HStack {
                 Text(entity.title).font(.system(size: 14, weight: .semibold))
                 Spacer()
                 if !entity.url.isEmpty {
                     Button {
-                        navigator.open(entity.url, title: entity.title, app: app)
+                        navigator.open(entity.url, title: entity.title, app: app, zoomID: moreZoomID)
                     } label: {
                         HStack(spacing: 2) {
                             Text(entity.subTitle.isEmpty ? "更多" : entity.subTitle)
@@ -112,9 +120,61 @@ private struct CardTitle: View {
                         .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .zoomTransitionSource(id: moreZoomID, cornerRadius: 8)
                 }
             }
         }
+    }
+}
+
+/// 非懒加载自适应等宽网格：避免嵌套在懒加载容器里回收子项，导致 iPadOS 缩放过渡锚点丢失。
+private struct AdaptiveGridLayout: Layout {
+    var minItemWidth: CGFloat = 84
+    var horizontalSpacing: CGFloat = 8
+    var verticalSpacing: CGFloat = 12
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 600
+        let plan = layout(width: width, subviews: subviews)
+        return CGSize(width: width, height: plan.totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let plan = layout(width: bounds.width, subviews: subviews)
+        for (index, frame) in plan.frames.enumerated() where index < subviews.count {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                proposal: ProposedViewSize(width: frame.width, height: frame.height)
+            )
+        }
+    }
+
+    private func layout(width: CGFloat, subviews: Subviews) -> (frames: [CGRect], totalHeight: CGFloat) {
+        guard !subviews.isEmpty, width > 0 else { return ([], 0) }
+        let fitColumns = max(1, Int((width + horizontalSpacing) / (minItemWidth + horizontalSpacing)))
+        let columns = min(fitColumns, subviews.count)
+        let itemWidth = (width - horizontalSpacing * CGFloat(columns - 1)) / CGFloat(columns)
+        var frames: [CGRect] = []
+        frames.reserveCapacity(subviews.count)
+        var y: CGFloat = 0
+        var rowStart = 0
+        while rowStart < subviews.count {
+            let rowEnd = min(rowStart + columns, subviews.count)
+            var rowHeight: CGFloat = 0
+            for idx in rowStart..<rowEnd {
+                let size = subviews[idx].sizeThatFits(ProposedViewSize(width: itemWidth, height: nil))
+                rowHeight = max(rowHeight, size.height)
+            }
+            for idx in rowStart..<rowEnd {
+                let col = idx - rowStart
+                let x = CGFloat(col) * (itemWidth + horizontalSpacing)
+                frames.append(CGRect(x: x, y: y, width: itemWidth, height: rowHeight))
+            }
+            y += rowHeight
+            if rowEnd < subviews.count { y += verticalSpacing }
+            rowStart = rowEnd
+        }
+        return (frames, y)
     }
 }
 
@@ -130,9 +190,13 @@ struct CarouselCard: View {
     var body: some View {
         let items = entity.entities.filter { !$0.pic.isEmpty }
         if !items.isEmpty {
-            let current = items[min(index, items.count - 1)]
+            let safeIndex = min(index, items.count - 1)
+            let current = items[safeIndex]
             let pixel = ImageURL.pixelSize(current.pic) ?? CGSize(width: 1080, height: 240)
-            CardLink(url: current.url, title: current.title) {
+            // 使用不随自动轮播下标变化的稳定 ID，防止返回时轮播已切页导致收起动画找不到锚点。
+            let carouselZoomID = "\(entity.id.uuidString)#carousel"
+            CardLink(url: current.url, title: current.title,
+                     zoomID: carouselZoomID, cornerRadius: 16, appliesZoomSource: false) {
                 Color.clear
                     .aspectRatio(min(max(pixel.width / pixel.height, 2.4), 5), contentMode: .fit)
                     .overlay { RemoteImage(current.pic, maxPixel: 1800).id(current.pic) }
@@ -156,6 +220,7 @@ struct CarouselCard: View {
             }
             // 避免横幅占满页面：最高 190pt。
             .frame(maxWidth: min(1280, 190 * min(max(pixel.width / pixel.height, 2.4), 5)))
+            .zoomTransitionSource(id: carouselZoomID, cornerRadius: 16)
             .onHover { hovering = $0 }
             .task(id: items.count) {
                 // 自动轮播，指针停在横幅上时暂停。
@@ -193,15 +258,17 @@ struct IconLinkGridCard: View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(entity: entity)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84, maximum: 130), spacing: 8)], spacing: 12) {
-                    ForEach(items) { item in
-                        CardLink(url: item.url, title: item.title) {
+                AdaptiveGridLayout(minItemWidth: 84, horizontalSpacing: 8, verticalSpacing: 12) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                        CardLink(url: item.url, title: item.title,
+                                 zoomID: "\(entity.id.uuidString)#grid-\(offset)", cornerRadius: 14) {
                             VStack(spacing: 6) {
                                 RemoteImage(item.pic.isEmpty ? item.logo : item.pic, maxPixel: 160, contentMode: .fit)
                                     .frame(width: 40, height: 40)
                                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                 Text(item.title).font(.system(size: 11.5)).lineLimit(1)
                             }
+                            .padding(.vertical, 4)
                             .frame(maxWidth: .infinity)
                         }
                     }
@@ -222,30 +289,33 @@ struct IconScrollCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    GlassEffectContainer(spacing: 8) {
-                        HStack(spacing: 8) {
-                            ForEach(items) { item in
-                                let title = item.title.isEmpty ? item.username : item.title
-                                let picture = [item.logo, item.pic, item.userAvatar].first { !$0.isEmpty } ?? ""
-                                let url = item.url.isEmpty && item.entityType == "user" ? "/u/\(item.uid)" : item.url
-                                CardLink(url: url, title: title) {
-                                    HStack(spacing: 8) {
-                                        RemoteImage(picture, maxPixel: 120)
-                                            .frame(width: 28, height: 28)
-                                            .clipShape(RoundedRectangle(cornerRadius: item.entityType == "user" ? 14 : 7, style: .continuous))
-                                        Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                                    }
-                                    .padding(.leading, 7)
-                                    .padding(.trailing, 13)
-                                    .padding(.vertical, 6)
-                                    .contentShape(Capsule())
+                    // 不包在 GlassEffectContainer 内：容器会把子项的 `.glassEffect` 合并进统一 SDFLayer，
+                    // 吞掉子项上的 `.matchedTransitionSource`，导致 iPadOS 缩放过渡退化为从屏幕中央打开。
+                    HStack(spacing: 8) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                            let title = item.title.isEmpty ? item.username : item.title
+                            let picture = [item.logo, item.pic, item.userAvatar].first { !$0.isEmpty } ?? ""
+                            let url = item.url.isEmpty && item.entityType == "user" ? "/u/\(item.uid)" : item.url
+                            let chipZoomID = "\(entity.id.uuidString)#chip-\(offset)"
+                            CardLink(url: url, title: title,
+                                     zoomID: chipZoomID, cornerRadius: 20, appliesZoomSource: false) {
+                                HStack(spacing: 8) {
+                                    RemoteImage(picture, maxPixel: 120)
+                                        .frame(width: 28, height: 28)
+                                        .clipShape(RoundedRectangle(cornerRadius: item.entityType == "user" ? 14 : 7, style: .continuous))
+                                    Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
                                 }
-                                .glassChip()
+                                .padding(.leading, 7)
+                                .padding(.trailing, 13)
+                                .padding(.vertical, 6)
+                                .contentShape(Capsule())
                             }
+                            .glassChip()
+                            .zoomTransitionSource(id: chipZoomID, cornerRadius: 20)
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 2)
                     }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 2)
                 }
                 .scrollClipDisabled()
             }
@@ -264,8 +334,9 @@ struct ImageSquareScrollCard: View {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(items) { item in
-                            CardLink(url: item.url, title: item.title) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                            CardLink(url: item.url, title: item.title,
+                                     zoomID: "\(entity.id.uuidString)#square-\(offset)", cornerRadius: 12) {
                                 RemoteImage(item.pic, maxPixel: 400)
                                     .frame(width: 104, height: 104)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -297,9 +368,11 @@ struct ImageTextScrollCard: View {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
-                        ForEach(items) { item in
+                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
                             let title = item.messageTitle.isEmpty ? item.title : item.messageTitle
-                            CardLink(url: item.url, title: title) {
+                            CardLink(url: item.url, title: title,
+                                     zoomID: "\(entity.id.uuidString)#imgtext-\(offset)", cornerRadius: 10,
+                                     onBeforeOpen: { app.remember(item) }) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     RemoteImage(item.messageCover.isEmpty ? item.pic : item.messageCover, maxPixel: 700)
                                         .frame(width: 210, height: 104)
@@ -311,7 +384,6 @@ struct ImageTextScrollCard: View {
                                         .frame(width: 210, alignment: .leading)
                                 }
                             }
-                            .simultaneousGesture(TapGesture().onEnded { app.remember(item) })
                         }
                     }
                 }
@@ -335,12 +407,15 @@ struct TitleCard: View {
 
 struct UserRow: View {
     let entity: Entity
+    var zoomSourceID: String? = nil
 
     @Environment(Navigator.self) private var navigator
 
+    private var resolvedZoomID: String { zoomSourceID ?? entity.id.uuidString }
+
     var body: some View {
         Button {
-            if !entity.uid.isEmpty { navigator.push(.user(entity.uid)) }
+            if !entity.uid.isEmpty { navigator.push(.user(entity.uid), zoomID: resolvedZoomID) }
         } label: {
             HStack(spacing: 12) {
                 AvatarView(url: entity.userAvatar, size: 44)
@@ -367,6 +442,7 @@ struct UserRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: resolvedZoomID)
     }
 }
 
@@ -386,7 +462,7 @@ struct TopicRow: View {
 
     var body: some View {
         Button {
-            navigator.open(entity.url, title: entity.title, app: app)
+            navigator.open(entity.url, title: entity.title, app: app, zoomID: entity.id.uuidString)
         } label: {
             HStack(spacing: 12) {
                 RemoteImage(entity.logo.isEmpty ? entity.pic : entity.logo, maxPixel: 200)
@@ -409,6 +485,7 @@ struct TopicRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: entity.id.uuidString)
     }
 }
 
@@ -420,7 +497,7 @@ struct AppRow: View {
     var body: some View {
         Button {
             let key = entity["apkname"].text ?? entity.entityID
-            if !key.isEmpty { navigator.push(.app(key)) }
+            if !key.isEmpty { navigator.push(.app(key), zoomID: entity.id.uuidString) }
         } label: {
             HStack(spacing: 12) {
                 RemoteImage(entity.logo, maxPixel: 200, contentMode: .fit)
@@ -443,6 +520,7 @@ struct AppRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: entity.id.uuidString)
     }
 }
 
@@ -458,6 +536,10 @@ struct NotificationRow: View {
         let avatar = entity["fromUserAvatar"].text ?? entity["messageUserAvatar"].text ?? entity["likeAvatar"].text ?? entity.userAvatar
         let body = entity["note"].text ?? entity.message
         let time = entity.dateline ?? entity["likeTime"].int
+        let openNotification: () -> Void = {
+            guard !entity.url.isEmpty else { return }
+            navigator.openCardLink(entity.url, title: entity.title, app: app, zoomID: entity.id.uuidString)
+        }
         HStack(alignment: .top, spacing: 12) {
             AvatarView(url: avatar, size: 38)
             VStack(alignment: .leading, spacing: 4) {
@@ -467,15 +549,14 @@ struct NotificationRow: View {
                     Text(Formatting.relative(time)).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 if !body.isEmpty {
-                    RichTextView(html: body, fontSize: app.settings.fontSize - 0.5, lineLimit: 4)
+                    RichTextView(html: body, fontSize: app.settings.fontSize - 0.5, lineLimit: 4,
+                                 onCardTap: entity.url.isEmpty ? nil : openNotification)
                 }
             }
         }
         .card(padding: 12, interactive: !entity.url.isEmpty)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onTapGesture {
-            guard !entity.url.isEmpty else { return }
-            navigator.openCardLink(entity.url, title: entity.title, app: app)
-        }
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .onTapGesture { openNotification() }
+        .zoomTransitionSource(id: entity.id.uuidString)
     }
 }

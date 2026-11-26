@@ -1,3 +1,4 @@
+import CoolapkKit
 import SwiftUI
 #if os(macOS)
 import AppKit
@@ -24,11 +25,39 @@ enum RichText {
 
     // MARK: 解析
 
-    private static let hrefPattern = try! NSRegularExpression(pattern: #"href\s*=\s*(["'])(.*?)\1"#, options: [.caseInsensitive])
+    /// 同时匹配带引号与不带引号的 `href` / `src` 属性（酷安部分 HTML 会省略引号）。
+    private static let hrefPattern = try! NSRegularExpression(
+        pattern: #"href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#, options: [.caseInsensitive])
+    private static let srcPattern = try! NSRegularExpression(
+        pattern: #"src\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#, options: [.caseInsensitive])
     private static let emojiPattern = try! NSRegularExpression(pattern: #"\[[^\[\]\s]{1,12}\]"#)
     private static let boldPattern = try! NSRegularExpression(pattern: #"\*\*(.+?)\*\*"#)
 
-    static func parse(_ html: String, emoji: Bool = true, markdown: Bool = false) -> [Node] {
+    private static func extractAttribute(_ pattern: NSRegularExpression, in tag: String) -> String {
+        let whole = NSRange(location: 0, length: (tag as NSString).length)
+        guard let match = pattern.firstMatch(in: tag, range: whole) else { return "" }
+        for group in 1...3 {
+            let nsRange = match.range(at: group)
+            if nsRange.location != NSNotFound, let range = Range(nsRange, in: tag) {
+                return decodeEntities(String(tag[range]))
+            }
+        }
+        return ""
+    }
+
+    /// 清理 `<a>` 内的 `[图片]` 短码，并保证指向图片地址的空标签仍有可点文字。
+    private static func cleanedLinkText(_ raw: String, href: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            if case .image = LinkRouter.resolve(href) { return "查看图片" }
+            return ""
+        }
+        guard raw.contains("[图片]") else { return raw }
+        let stripped = raw.replacingOccurrences(of: "[图片]", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? "查看图片" : stripped
+    }
+
+    static func parse(_ html: String, emoji: Bool = true, markdown: Bool = false, photoLinkHref: String? = nil) -> [Node] {
         var nodes: [Node] = []
         var bold = false
         var linkHref: String?
@@ -42,7 +71,7 @@ enum RichText {
             if linkHref != nil {
                 linkText += text
             } else {
-                appendText(text, bold: bold, emoji: emoji, markdown: markdown, to: &nodes)
+                appendText(text, bold: bold, emoji: emoji, markdown: markdown, photoLinkHref: photoLinkHref, to: &nodes)
             }
         }
 
@@ -58,26 +87,30 @@ enum RichText {
                     buffer += "\n"
                 } else if lower.hasPrefix("a ") || lower == "a" {
                     flush()
-                    let tagString = String(tag)
-                    let whole = NSRange(location: 0, length: (tagString as NSString).length)
-                    if let match = hrefPattern.firstMatch(in: tagString, range: whole),
-                       let hrefRange = Range(match.range(at: 2), in: tagString) {
-                        linkHref = decodeEntities(String(tagString[hrefRange]))
-                    } else {
-                        linkHref = ""
-                    }
+                    linkHref = extractAttribute(hrefPattern, in: String(tag))
                     linkText = ""
                 } else if lower.hasPrefix("/a") {
                     flush()
                     if let href = linkHref {
                         if href.isEmpty {
-                            appendText(linkText, bold: bold, emoji: emoji, markdown: false, to: &nodes)
-                        } else if !linkText.isEmpty {
-                            nodes.append(.link(linkText, href: href))
+                            appendText(linkText, bold: bold, emoji: emoji, markdown: false, photoLinkHref: photoLinkHref, to: &nodes)
+                        } else {
+                            let label = cleanedLinkText(linkText, href: href)
+                            if !label.isEmpty {
+                                nodes.append(.link(label, href: href))
+                            }
                         }
                     }
                     linkHref = nil
                     linkText = ""
+                } else if lower.hasPrefix("img ") {
+                    flush()
+                    if linkHref == nil {
+                        let src = extractAttribute(srcPattern, in: String(tag))
+                        if case .image(let imageURL) = LinkRouter.resolve(src) {
+                            nodes.append(.link("查看图片", href: imageURL))
+                        }
+                    }
                 } else if lower == "b" || lower == "strong" || lower.hasPrefix("b ") || lower.hasPrefix("strong ") {
                     flush(); bold = true
                 } else if lower == "/b" || lower == "/strong" {
@@ -97,7 +130,10 @@ enum RichText {
             }
         }
         flush()
-        if let href = linkHref, !linkText.isEmpty { nodes.append(.link(linkText, href: href)) }
+        if let href = linkHref, !href.isEmpty {
+            let label = cleanedLinkText(linkText, href: href)
+            if !label.isEmpty { nodes.append(.link(label, href: href)) }
+        }
         return nodes
     }
 
@@ -106,7 +142,9 @@ enum RichText {
         return first == "/" || (first.isASCII && CharacterSet.letters.contains(first))
     }
 
-    private static func appendText(_ text: String, bold: Bool, emoji: Bool, markdown: Bool, to nodes: inout [Node]) {
+    private static func appendText(
+        _ text: String, bold: Bool, emoji: Bool, markdown: Bool, photoLinkHref: String?, to nodes: inout [Node]
+    ) {
         guard !text.isEmpty else { return }
         if markdown, !bold {
             let ns = text as NSString
@@ -114,21 +152,24 @@ enum RichText {
             for match in boldPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
                 if match.range.location > cursor {
                     appendEmojiText(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)),
-                                    bold: false, emoji: emoji, to: &nodes)
+                                    bold: false, emoji: emoji, photoLinkHref: photoLinkHref, to: &nodes)
                 }
-                appendEmojiText(ns.substring(with: match.range(at: 1)), bold: true, emoji: emoji, to: &nodes)
+                appendEmojiText(ns.substring(with: match.range(at: 1)), bold: true, emoji: emoji, photoLinkHref: photoLinkHref, to: &nodes)
                 cursor = match.range.location + match.range.length
             }
             if cursor < ns.length {
-                appendEmojiText(ns.substring(from: cursor), bold: false, emoji: emoji, to: &nodes)
+                appendEmojiText(ns.substring(from: cursor), bold: false, emoji: emoji, photoLinkHref: photoLinkHref, to: &nodes)
             }
         } else {
-            appendEmojiText(text, bold: bold, emoji: emoji, to: &nodes)
+            appendEmojiText(text, bold: bold, emoji: emoji, photoLinkHref: photoLinkHref, to: &nodes)
         }
     }
 
-    private static func appendEmojiText(_ text: String, bold: Bool, emoji: Bool, to nodes: inout [Node]) {
-        guard emoji, text.contains("[") else {
+    private static func appendEmojiText(
+        _ text: String, bold: Bool, emoji: Bool, photoLinkHref: String?, to nodes: inout [Node]
+    ) {
+        let hasPhotoLink = photoLinkHref.map { !$0.isEmpty } ?? false
+        guard (emoji || hasPhotoLink), text.contains("[") else {
             nodes.append(.text(text, bold: bold))
             return
         }
@@ -137,13 +178,18 @@ enum RichText {
         for match in emojiPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             let token = ns.substring(with: match.range)
             guard let file = EmojiMap.map[token] else { continue }
+            if !emoji, !file.hasSuffix(".icon") { continue }
             if match.range.location > cursor {
                 nodes.append(.text(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), bold: bold))
             }
             if file.hasSuffix(".png") {
                 nodes.append(.emoji(file))
             } else if file.hasSuffix(".icon") {
-                nodes.append(.photoIcon)
+                if let photoLinkHref, !photoLinkHref.isEmpty {
+                    nodes.append(.link("查看图片", href: photoLinkHref))
+                } else {
+                    nodes.append(.photoIcon)
+                }
             } else {
                 nodes.append(.badge(file))
             }
@@ -288,7 +334,7 @@ enum RichText {
                 }
             case .photoIcon:
                 flush()
-                append(Text(Image(systemName: "photo")).font(.system(size: fontSize)).foregroundColor(tint))
+                append(Text(Image(systemName: "photo")).font(.system(size: fontSize)).foregroundColor(.secondary))
             }
         }
         flush()
@@ -303,16 +349,80 @@ struct RichTextView: View {
     var weight: Font.Weight = .regular
     var lineLimit: Int?
     var markdown = false
+    /// 所属帖子或评论：点开正文里的图片链接时，一并带出多图与实况元数据。
+    var mediaSource: Entity?
+    /// 所属评论附带的图片：把正文里裸露的 `[图片]` 占位变为可点击链接。
+    var fallbackPictures: [String] = []
+    /// 卡片内正文的点击兜底：iPadOS 上包含 `.link` 属性的 `Text` 会拦截整个文本框的点击手势，
+    /// 导致点在普通文字上时外层卡片的 `.onTapGesture` 收不到事件。这里用并发点击手势透传给卡片，
+    /// 真正点到链接时由 `openURL` 里的 `noteLinkActivated()` 抑制卡片打开。
+    var onCardTap: (() -> Void)? = nil
 
     @Environment(AppModel.self) private var app
+    @Environment(Navigator.self) private var navigator: Navigator?
 
     var body: some View {
         let size = fontSize ?? app.settings.fontSize
-        RichText.text(RichText.parse(html, emoji: app.settings.showEmoji, markdown: markdown), fontSize: size, weight: weight)
-            .lineSpacing(size * 0.32)
-            .lineLimit(lineLimit)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let text = RichText.text(
+            RichText.parse(html, emoji: app.settings.showEmoji, markdown: markdown, photoLinkHref: fallbackPictures.first),
+            fontSize: size,
+            weight: weight
+        )
+        .lineSpacing(size * 0.32)
+        .lineLimit(lineLimit)
+        .multilineTextAlignment(.leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(CardTapPassthrough(action: onCardTap))
+
+        if mediaSource != nil || !fallbackPictures.isEmpty {
+            text.environment(\.openURL, OpenURLAction { url in
+                guard let href = RichText.href(from: url) else { return .systemAction }
+                navigator?.noteLinkActivated()
+                if case .image(let imageURL) = LinkRouter.resolve(href) {
+                    openImage(imageURL)
+                    return .handled
+                }
+                navigator?.open(href, app: app)
+                return .handled
+            })
+        } else {
+            text
+        }
+    }
+
+    private func openImage(_ tappedURL: String) {
+        let normalizedTapped = ImageURL.normalized(tappedURL)?.absoluteString
+        var gallery = fallbackPictures
+        if gallery.isEmpty, let mediaSource {
+            gallery = mediaSource.entityType == "feed_reply" ? mediaSource.replyPictures : mediaSource.pictures
+        }
+        let index: Int
+        if let existing = gallery.firstIndex(where: {
+            $0 == tappedURL || (normalizedTapped != nil && ImageURL.normalized($0)?.absoluteString == normalizedTapped)
+        }) {
+            index = existing
+        } else {
+            gallery.insert(tappedURL, at: 0)
+            index = 0
+        }
+        if let mediaSource {
+            ImageViewer.show(media: mediaSource.mediaItems(for: gallery), index: index)
+        } else {
+            ImageViewer.show(urls: gallery, index: index)
+        }
+    }
+}
+
+private struct CardTapPassthrough: ViewModifier {
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let action {
+            content.simultaneousGesture(TapGesture().onEnded(action))
+        } else {
+            content
+        }
     }
 }

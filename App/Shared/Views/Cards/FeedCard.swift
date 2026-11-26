@@ -28,27 +28,31 @@ struct FeedCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !entity.message.isEmpty {
-                RichTextView(html: entity.message, lineLimit: textLineLimit, markdown: isArticle)
+                RichTextView(html: entity.message, lineLimit: textLineLimit, markdown: isArticle,
+                             mediaSource: entity, fallbackPictures: entity.pictures, onCardTap: open)
                     .foregroundStyle(isArticle ? .secondary : .primary)
             }
             if !isArticle, !entity.pictures.isEmpty {
                 FeedImageGrid(pictures: entity.pictures, source: entity)
             }
             if let source = entity.forwardSource {
-                ForwardedFeedView(entity: source)
+                ForwardedFeedView(entity: source, zoomSourceID: "\(entity.id.uuidString)#forward")
             }
             if !entity.extraTitle.isEmpty, !entity.extraURL.isEmpty {
-                ExtraLinkView(title: entity.extraTitle, url: entity.extraURL, picture: entity.extraPic)
+                ExtraLinkView(title: entity.extraTitle, url: entity.extraURL, picture: entity.extraPic,
+                              zoomSourceID: "\(entity.id.uuidString)#extra")
             }
             FeedTagRow(entity: entity)
-            if app.settings.showReplyPreview, let reply = entity.replyRows.first, !reply.message.isEmpty {
-                HotReplyPreview(reply: reply)
+            if app.settings.showReplyPreview, let reply = entity.replyRows.first,
+               !reply.message.isEmpty || !reply.replyPictures.isEmpty {
+                HotReplyPreview(reply: reply, onCardTap: open)
             }
             FeedCounters(entity: entity)
         }
         .card(interactive: true)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onTapGesture { open() }
+        .zoomTransitionSource(id: entity.id.uuidString)
         .contextMenu { FeedContextMenu(entity: entity) }
         // 整张卡片作为一个无障碍元素，默认操作是打开动态（而不是
         // 卡片里的第一个控件），其余作为具名操作。
@@ -62,26 +66,33 @@ struct FeedCard: View {
 
     private func open() {
         let id = entity.entityID
-        guard !id.isEmpty else { return }
-        app.remember(entity)
-        navigator.openCard(.feed(id: id))
+        if !id.isEmpty, id != "0" {
+            app.remember(entity)
+            navigator.openCard(.feed(id: id), zoomID: entity.id.uuidString)
+        } else if !entity.url.isEmpty {
+            let title = entity.messageTitle.isEmpty ? entity.title : entity.messageTitle
+            navigator.openCardLink(entity.url, title: title, app: app, zoomID: entity.id.uuidString)
+        }
     }
 }
 
 struct FeedAuthorHeader: View {
     let entity: Entity
     var avatarSize: CGFloat = 36
+    var zoomPrefix: String = ""
 
     @Environment(Navigator.self) private var navigator
 
     var body: some View {
+        let avatarZoomID = "\(zoomPrefix)\(entity.id.uuidString)#author"
         HStack(alignment: .center, spacing: 10) {
             Button {
-                if !entity.uid.isEmpty { navigator.push(.user(entity.uid)) }
+                if !entity.uid.isEmpty { navigator.push(.user(entity.uid), zoomID: avatarZoomID) }
             } label: {
                 AvatarView(url: entity.userAvatar, size: avatarSize)
             }
             .buttonStyle(.plain)
+            .zoomTransitionSource(id: avatarZoomID, cornerRadius: avatarSize / 2)
             .accessibilityLabel("\(entity.username) 的主页")
 
             VStack(alignment: .leading, spacing: 2) {
@@ -194,6 +205,7 @@ struct FeedImageGrid: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(alignment: .bottomTrailing) { marks(picture, isLong: isLong) }
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
         .frame(maxWidth: fillsWidth ? .infinity : (ratio < 1 ? 260 : 460),
@@ -205,7 +217,7 @@ struct FeedImageGrid: View {
         let size = ImageURL.pixelSize(picture)
         let isLong = size.map { $0.height / $0.width > 2.4 } ?? false
         return Button {
-            ImageViewer.show(urls: pictures, index: index)
+            openViewer(at: index)
         } label: {
             Color.clear
                 .aspectRatio(1, contentMode: .fit)
@@ -221,6 +233,7 @@ struct FeedImageGrid: View {
                         marks(picture, isLong: isLong)
                     }
                 }
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("查看第 \(index + 1) 张图片")
@@ -241,6 +254,7 @@ struct FeedImageGrid: View {
 
 struct ForwardedFeedView: View {
     let entity: Entity
+    var zoomSourceID: String? = nil
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
@@ -250,7 +264,8 @@ struct ForwardedFeedView: View {
             let name = RichText.escape(entity.username)
             RichTextView(
                 html: "<a href=\"/u/\(entity.uid)\">@\(name)</a>: " + (entity.messageTitle.isEmpty ? entity.message : entity.messageTitle),
-                fontSize: app.settings.fontSize - 1, lineLimit: 6)
+                fontSize: app.settings.fontSize - 1, lineLimit: 6,
+                mediaSource: entity, fallbackPictures: entity.pictures, onCardTap: open)
             if !entity.pictures.isEmpty {
                 FeedImageGrid(pictures: entity.pictures, maxCount: 3, source: entity)
             }
@@ -259,11 +274,14 @@ struct ForwardedFeedView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .onTapGesture {
-            guard !entity.entityID.isEmpty else { return }
-            app.remember(entity)
-            navigator.openCard(.feed(id: entity.entityID))
-        }
+        .onTapGesture { open() }
+        .zoomTransitionSource(id: zoomSourceID, cornerRadius: 10)
+    }
+
+    private func open() {
+        guard !entity.entityID.isEmpty, entity.entityID != "0" else { return }
+        app.remember(entity)
+        navigator.openCard(.feed(id: entity.entityID), zoomID: zoomSourceID)
     }
 }
 
@@ -271,13 +289,14 @@ struct ExtraLinkView: View {
     let title: String
     let url: String
     let picture: String
+    var zoomSourceID: String? = nil
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
 
     var body: some View {
         Button {
-            navigator.open(url, title: title, app: app)
+            navigator.open(url, title: title, app: app, zoomID: zoomSourceID)
         } label: {
             HStack(spacing: 10) {
                 if picture.isEmpty {
@@ -301,12 +320,14 @@ struct ExtraLinkView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: zoomSourceID, cornerRadius: 10)
     }
 }
 
 /// 动态附带的话题 / 数码 / 频道标签。
 struct FeedTagRow: View {
     let entity: Entity
+    var zoomPrefix: String = ""
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
@@ -341,9 +362,10 @@ struct FeedTagRow: View {
 
     private func row(_ items: [(title: String, url: String, logo: String)]) -> some View {
         HStack(spacing: 6) {
-            ForEach(Array(items.enumerated()), id: \.offset) { _, chip in
+            ForEach(Array(items.enumerated()), id: \.offset) { index, chip in
+                let chipZoomID = "\(zoomPrefix)\(entity.id.uuidString)#tag-\(index)"
                 Button {
-                    navigator.open(chip.url, title: chip.title, app: app)
+                    navigator.open(chip.url, title: chip.title, app: app, zoomID: chipZoomID)
                 } label: {
                     HStack(spacing: 4) {
                         if !chip.logo.isEmpty {
@@ -360,6 +382,7 @@ struct FeedTagRow: View {
                 }
                 .buttonStyle(.plain)
                 .glassChip()
+                .zoomTransitionSource(id: chipZoomID, cornerRadius: 14)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -368,17 +391,33 @@ struct FeedTagRow: View {
 
 struct HotReplyPreview: View {
     let reply: Entity
+    var onCardTap: (() -> Void)? = nil
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        RichTextView(
-            html: "<b>\(RichText.escape(reply.username))</b>: \(reply.message)"
-                + (reply.pictures.isEmpty && reply.pic.isEmpty ? "" : " [图片]"),
-            fontSize: app.settings.fontSize - 1.5, lineLimit: 2)
+        let pictures = reply.replyPictures
+        let trimmed = reply.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let messageOnlyPhoto = !pictures.isEmpty && (trimmed.isEmpty || trimmed == "[图片]")
+        VStack(alignment: .leading, spacing: 5) {
+            RichTextView(
+                html: messageOnlyPhoto
+                    ? "<b>\(RichText.escape(reply.username))</b>:"
+                    : "<b>\(RichText.escape(reply.username))</b>: \(reply.message)",
+                fontSize: app.settings.fontSize - 1.5,
+                lineLimit: 2,
+                mediaSource: reply,
+                fallbackPictures: pictures,
+                onCardTap: onCardTap
+            )
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            if !pictures.isEmpty {
+                ReplyImageButton(pictures: pictures, source: reply, fontSize: 11.5)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -407,7 +446,7 @@ struct FeedCounters: View {
                 .accessibilityLabel(liked ? "取消点赞，\(likeCount)" : "点赞，\(likeCount)")
                 Button {
                     app.remember(entity)
-                    navigator.openCard(.feed(id: entity.entityID))
+                    navigator.openCard(.feed(id: entity.entityID), zoomID: entity.id.uuidString)
                 } label: {
                     GlassCounterLabel(text: Formatting.count(entity.replyCount), systemImage: "bubble.left")
                 }
@@ -467,7 +506,7 @@ struct FeedContextMenu: View {
         let link = "https://www.coolapk.com/feed/\(id)"
         Button("打开") {
             app.remember(entity)
-            navigator.push(.feed(id: id))
+            navigator.push(.feed(id: id), zoomID: entity.id.uuidString)
         }
         Button("在浏览器中打开") {
             if let url = URL(string: link) { Platform.open(url) }

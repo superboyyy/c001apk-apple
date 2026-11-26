@@ -7,6 +7,7 @@ struct FeedDetailView: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
+    @Environment(\.isActiveRoute) private var isActiveRoute
 
     @State private var entity: Entity?
     @State private var failure: APIError?
@@ -15,6 +16,8 @@ struct FeedDetailView: View {
     @State private var sort: CoolapkClient.ReplySort = .latestActivity
     @State private var authorOnly = false
     @State private var replies: PagedList?
+    @State private var loadedReplyKey: ReplyKey?
+    @State private var loadedID: String?
     @State private var thread: Entity?
     @State private var replyTarget: Entity?
     @State private var draft = ""
@@ -108,7 +111,7 @@ struct FeedDetailView: View {
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-        .navigationTitle(entity.map { $0.messageTitle.isEmpty ? "\($0.username) 的动态" : $0.messageTitle } ?? "动态")
+        .routeTitle(entity.map { $0.messageTitle.isEmpty ? "\($0.username) 的动态" : $0.messageTitle } ?? "动态")
         .toolbar { toolbar }
         .sheet(item: $thread) { root in
             ReplyThreadSheet(root: root) { startReply(to: $0) }
@@ -122,6 +125,10 @@ struct FeedDetailView: View {
             }
         }
         .task(id: ReplyKey(sort: sort, authorOnly: authorOnly)) {
+            let key = ReplyKey(sort: sort, authorOnly: authorOnly)
+            // 从评论者主页或引用帖返回时，保留当前评论列表与滚动位置。
+            guard loadedReplyKey != key || replies == nil else { return }
+            loadedReplyKey = key
             let client = app.client
             let feedID = id
             let sort = sort
@@ -133,6 +140,7 @@ struct FeedDetailView: View {
         }
         .task(id: id) {
             if entity == nil { entity = app.preview(feed: id) }
+            guard loadedID != id || entity == nil else { return }
             await load(interactive: false)
         }
         .onChange(of: replies?.phase) { _, phase in
@@ -173,6 +181,7 @@ struct FeedDetailView: View {
                 loaded = try await app.client.feedDetail(id: id)
             }
             entity = loaded
+            loadedID = id
             failure = nil
             isComplete = !loaded.isPublicCopy
             if app.settings.recordHistory { app.library.recordHistory(loaded) }
@@ -319,39 +328,41 @@ struct FeedDetailView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task {
-                    await load(interactive: true)
-                    await replies?.refresh(interactive: true)
-                }
-            } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
-            }
-            .keyboardShortcut("r", modifiers: .command)
-            .help("刷新（⌘R）")
-        }
-        if let entity {
+        if isActiveRoute {
             ToolbarItem(placement: .primaryAction) {
-                FeedExportButton(feed: entity)
-            }
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Menu {
-                Button("在浏览器中打开") {
-                    if let url = URL(string: "https://www.coolapk.com/feed/\(id)") { Platform.open(url) }
-                }
-                Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(id)") }
-                if let entity {
-                    Button("拷贝正文") { Platform.copy(FeedBodyView.plainText(of: entity)) }
-                    Divider()
-                    Button("屏蔽 \(entity.username)（仅本机）") {
-                        app.library.block(uid: entity.uid, username: entity.username)
-                        app.showToast("已在本机屏蔽 \(entity.username)")
+                Button {
+                    Task {
+                        await load(interactive: true)
+                        await replies?.refresh(interactive: true)
                     }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
                 }
-            } label: {
-                Label("更多", systemImage: "ellipsis")
+                .keyboardShortcut("r", modifiers: .command)
+                .help("刷新（⌘R）")
+            }
+            if let entity {
+                ToolbarItem(placement: .primaryAction) {
+                    FeedExportButton(feed: entity)
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("在浏览器中打开") {
+                        if let url = URL(string: "https://www.coolapk.com/feed/\(id)") { Platform.open(url) }
+                    }
+                    Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(id)") }
+                    if let entity {
+                        Button("拷贝正文") { Platform.copy(FeedBodyView.plainText(of: entity)) }
+                        Divider()
+                        Button("屏蔽 \(entity.username)（仅本机）") {
+                            app.library.block(uid: entity.uid, username: entity.username)
+                            app.showToast("已在本机屏蔽 \(entity.username)")
+                        }
+                    }
+                } label: {
+                    Label("更多", systemImage: "ellipsis")
+                }
             }
         }
     }
@@ -554,7 +565,7 @@ struct FeedBodyView: View {
         let parts = FeedBodyView.parts(of: entity)
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                FeedAuthorHeader(entity: entity, avatarSize: 42)
+                FeedAuthorHeader(entity: entity, avatarSize: 42, zoomPrefix: "detail-")
                 FollowButton(uid: entity.uid, initiallyFollowing: entity.isFollowingAuthor)
             }
             if !entity.messageCover.isEmpty {
@@ -570,7 +581,8 @@ struct FeedBodyView: View {
                 if entity.isArticle {
                     MarkdownTextView(text: entity.message, fontSize: app.settings.fontSize + 1)
                 } else {
-                    RichTextView(html: entity.message, fontSize: app.settings.fontSize + 1)
+                    RichTextView(html: entity.message, fontSize: app.settings.fontSize + 1,
+                                 mediaSource: entity, fallbackPictures: entity.pictures)
                         .textSelection(.enabled)
                 }
                 if !entity.pictures.isEmpty {
@@ -580,12 +592,13 @@ struct FeedBodyView: View {
                 ArticleBody(parts: parts, entity: entity)
             }
             if let source = entity.forwardSource {
-                ForwardedFeedView(entity: source)
+                ForwardedFeedView(entity: source, zoomSourceID: "detail-\(entity.id.uuidString)#forward")
             }
             if !entity.extraTitle.isEmpty, !entity.extraURL.isEmpty {
-                ExtraLinkView(title: entity.extraTitle, url: entity.extraURL, picture: entity.extraPic)
+                ExtraLinkView(title: entity.extraTitle, url: entity.extraURL, picture: entity.extraPic,
+                              zoomSourceID: "detail-\(entity.id.uuidString)#extra")
             }
-            FeedTagRow(entity: entity)
+            FeedTagRow(entity: entity, zoomPrefix: "detail-")
             HStack(spacing: 6) {
                 Text(Formatting.absolute(entity.dateline))
                 if entity.isPublicCopy { Text("· 公开页内容") }
@@ -688,7 +701,8 @@ private struct ArticleBody: View {
                 case .image:
                     articleImage(part, all: images)
                 case .link:
-                    ExtraLinkView(title: part.text, url: part.url, picture: "")
+                    ExtraLinkView(title: part.text, url: part.url, picture: "",
+                                  zoomSourceID: "article-\(entity.id.uuidString)#part-\(part.id)")
                 }
             }
         }
