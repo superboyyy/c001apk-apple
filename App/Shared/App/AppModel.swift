@@ -133,6 +133,9 @@ final class AppModel {
 
     var isLoggedIn: Bool { account != nil }
 
+    /// 按账号隔离的列表缓存作用域，防止切换或退出账号后闪现旧账号内容。
+    var cacheScope: String { account.map { "uid-\($0.uid)" } ?? "guest" }
+
     /// 打开发布 / 回复编辑器（需要登录）。
     func compose(_ target: ComposeTarget, onFinish: ((Entity) -> Void)? = nil) {
         guard requireLogin() else { return }
@@ -185,6 +188,7 @@ final class AppModel {
 
     /// 移除一个账号；移除的是当前账号时切到下一个，没有则回到游客。
     func removeAccount(uid: String) {
+        FeedCache.shared.clear(scope: "uid-\(uid)")
         accounts.removeAll { $0.uid == uid }
         if account?.uid == uid {
             account = accounts.first
