@@ -44,6 +44,7 @@ final class FeedMediaTests: XCTestCase {
 
     func testDisplayURLOnlyUpgradesCoolapkImageHost() {
         XCTAssertEqual(FeedMedia(url: "http://image.coolapk.com/a@1x2.jpg").displayURL, "https://image.coolapk.com/a@1x2.jpg")
+        XCTAssertEqual(FeedMedia(url: "//image.coolapk.com/a@1x2.jpg").displayURL, "https://image.coolapk.com/a@1x2.jpg")
         XCTAssertEqual(FeedMedia(url: "http://example.com/a.jpg").displayURL, "http://example.com/a.jpg")
         let media = FeedMedia(sourceURL: "https://example.com/a.jpg", previewURL: "https://example.com/a.s.jpg")
         XCTAssertEqual(media.thumbnailURL, "https://example.com/a.s.jpg")
@@ -67,6 +68,12 @@ final class FeedMediaTests: XCTestCase {
         XCTAssertTrue(items[1].isLivePhoto)
         XCTAssertTrue(items[1].isHDR)
         XCTAssertEqual(items[1].thumbnailURL, "https://image.coolapk.com/b@1x2.jpg.s.jpg")
+
+        // 仅带 pic 字段的评论也能生成对应回复素材（包含文件名实况标记）。
+        let picOnlyReply = entity(#"{"entityType": "feed_reply", "id": "10", "pic": "http://image.coolapk.com/r-livepic@1x1.jpg"}"#)
+        XCTAssertEqual(picOnlyReply.mediaItems.count, 1)
+        XCTAssertEqual(picOnlyReply.mediaItems[0].contentType, .reply)
+        XCTAssertTrue(picOnlyReply.mediaItems[0].isLivePhoto)
     }
 
     func testMetadataAloneProvidesTheList() {

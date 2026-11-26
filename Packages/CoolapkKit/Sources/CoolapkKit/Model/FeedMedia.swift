@@ -39,10 +39,11 @@ public struct FeedMedia: Sendable, Equatable {
                   contentID: contentID, contentType: contentType)
     }
 
-    /// 用于显示的地址：酷安图床的 http 链接升级为 https。
+    /// 用于显示的地址：酷安图床的 http 链接升级为 https，无协议头链接补全 https。
     public var displayURL: String {
-        guard let components = URLComponents(string: sourceURL), components.scheme == "http",
-              components.host == "image.coolapk.com"
+        if sourceURL.hasPrefix("//") { return "https:" + sourceURL }
+        guard let components = URLComponents(string: sourceURL), components.scheme?.lowercased() == "http",
+              components.host?.lowercased() == "image.coolapk.com"
         else { return sourceURL }
         return "https" + sourceURL.dropFirst("http".count)
     }
@@ -166,10 +167,11 @@ extension Entity {
 
     private var mediaContentType: MediaContentType { entityType == "feed_reply" ? .reply : .feed }
 
-    /// 这条帖子或评论的图片素材，顺序与 `pictures` 一致。
+    /// 这条帖子或评论的图片素材，顺序与 `pictures`（评论回退 `pic`）一致。
     public var mediaItems: [FeedMedia] {
-        FeedMedia.items(metadata: mediaMetadata, urls: pictures, contentID: entityID.isEmpty ? nil : entityID,
-                        contentType: mediaContentType)
+        let urls = entityType == "feed_reply" ? replyPictures : pictures
+        return FeedMedia.items(metadata: mediaMetadata, urls: urls, contentID: entityID.isEmpty ? nil : entityID,
+                               contentType: mediaContentType)
     }
 
     /// 给定要显示的图片地址（如图文正文里的图片），返回带元数据的素材列表。

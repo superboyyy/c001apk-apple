@@ -22,12 +22,29 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(web.pictures, ["https://image.coolapk.com/a@1x2.jpg"])
         let nested = Entity(JSON.parse(#"{"imageUriList": [{"url": "https://image.coolapk.com/b.png"}]}"#)!)
         XCTAssertEqual(nested.pictures, ["https://image.coolapk.com/b.png"])
+        // picArr 为空数组或仅含空串时，仍应回退到 imageUriList。
+        let emptyPicArrFallback = Entity(JSON.parse(#"{"picArr": [""], "imageUriList": ["https://image.coolapk.com/c.jpg"]}"#)!)
+        XCTAssertEqual(emptyPicArrFallback.pictures, ["https://image.coolapk.com/c.jpg"])
         XCTAssertTrue(Entity(JSON.parse(#"{"picArr": [""]}"#)!).pictures.isEmpty)
+
+        // 评论附带单图时回退到 pic（支持无协议头）。
+        let replyWithPicOnly = Entity(JSON.parse(#"{"entityType": "feed_reply", "pic": "//image.coolapk.com/r@1x1.jpg"}"#)!)
+        XCTAssertEqual(replyWithPicOnly.replyPictures, ["https://image.coolapk.com/r@1x1.jpg"])
+        let replyWithMulti = Entity(JSON.parse(#"{"entityType": "feed_reply", "pic": "http://image.coolapk.com/1.jpg", "picArr": ["http://image.coolapk.com/1.jpg", "http://image.coolapk.com/2.jpg"]}"#)!)
+        XCTAssertEqual(replyWithMulti.replyPictures, ["http://image.coolapk.com/1.jpg", "http://image.coolapk.com/2.jpg"])
     }
 
     func testDatelineFallsBackToCreateTime() {
         let web = Entity(JSON.parse(#"{"dateline": "3天前", "create_time": 1795340885}"#)!)
         XCTAssertEqual(web.dateline, 1_795_340_885)
+    }
+
+    func testEntityPreservesExplicitID() {
+        let id = UUID()
+        let first = Entity(id: id, json: JSON.parse(#"{"id": 100, "likenum": 1}"#)!)
+        let updated = Entity(id: id, json: JSON.parse(#"{"id": 100, "likenum": 5}"#)!)
+        XCTAssertEqual(first, updated)
+        XCTAssertEqual(updated.likeCount, 5)
     }
 
     func testDeviceCodeRoundTrip() throws {

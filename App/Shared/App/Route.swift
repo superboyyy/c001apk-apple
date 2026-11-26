@@ -32,13 +32,20 @@ enum LinkRouter {
     ]
 
     static func resolve(_ raw: String, title: String? = nil) -> LinkTarget {
-        let link = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !link.isEmpty else { return .unsupported }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unsupported }
+        // 酷安网页版或部分评论里的图片链接不带协议头（`//image.coolapk.com/…`），先补全再解析。
+        let link = trimmed.hasPrefix("//") ? "https:" + trimmed : trimmed
 
         var path = link
         var externalURL: URL?
-        if !link.hasPrefix("/") && !link.hasPrefix("#"), let components = URLComponents(string: link),
-           let scheme = components.scheme?.lowercased() {
+        let parsedComponents: URLComponents? = if !link.hasPrefix("/") && !link.hasPrefix("#") {
+            URLComponents(string: link)
+                ?? link.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap(URLComponents.init(string:))
+        } else {
+            nil
+        }
+        if let components = parsedComponents, let scheme = components.scheme?.lowercased() {
             let host = components.host?.lowercased() ?? ""
             let query = components.percentEncodedQuery.map { "?" + $0 } ?? ""
             if scheme == "coolmarket" {
@@ -47,7 +54,7 @@ enum LinkRouter {
                     : "/" + host + components.percentEncodedPath
                 path = base + query
             } else if scheme == "http" || scheme == "https" {
-                if host.hasSuffix("image.coolapk.com") { return .image(link) }
+                if isCoolapkImageHost(host) { return .image(link) }
                 if hosts.contains(host) {
                     path = components.percentEncodedPath + query
                     if let fragment = components.percentEncodedFragment, components.percentEncodedPath.count <= 1,
@@ -55,7 +62,7 @@ enum LinkRouter {
                         path = "#" + fragment
                     }
                 } else {
-                    externalURL = URL(string: link)
+                    externalURL = components.url ?? URL(string: link)
                 }
             } else {
                 return .unsupported
@@ -103,6 +110,11 @@ enum LinkRouter {
         default:
             return fallback(link)
         }
+    }
+
+    private static func isCoolapkImageHost(_ host: String) -> Bool {
+        host == "image.coolapk.com" || host.hasSuffix(".image.coolapk.com")
+            || host == "pic.coolapk.com" || host.hasSuffix(".pic.coolapk.com")
     }
 
     /// 酷安域名下无法识别的链接仍交给网站打开。

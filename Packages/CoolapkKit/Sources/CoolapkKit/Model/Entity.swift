@@ -12,6 +12,12 @@ public struct Entity: Identifiable, Sendable, Equatable {
         self.json = json
     }
 
+    /// 用指定标识重建实体（无感刷新时保留已有卡片的 SwiftUI 身份，避免闪烁）。
+    public init(id: UUID, json: JSON) {
+        self.id = id
+        self.json = json
+    }
+
     public static func == (lhs: Entity, rhs: Entity) -> Bool { lhs.id == rhs.id }
 
     public subscript(key: String) -> JSON { json[key] }
@@ -77,12 +83,17 @@ public struct Entity: Identifiable, Sendable, Equatable {
     public var extraPic: String { json["extra_pic"].string ?? "" }
 
     public var pictures: [String] {
-        let raw = json["picArr"].isNull
-            ? (json["imageUriList"].isNull
-                ? (json["image_uri_list"].isNull ? json["pics"] : json["image_uri_list"])
-                : json["imageUriList"])
-            : json["picArr"]
-        return Entity.mediaURLs(raw)
+        for key in ["picArr", "imageUriList", "image_uri_list", "pics"] {
+            let urls = Entity.mediaURLs(json[key])
+            if !urls.isEmpty { return urls }
+        }
+        return []
+    }
+
+    /// 评论附带的图片地址：优先取多图列表，缺失时回退到单图 `pic`。
+    public var replyPictures: [String] {
+        let list = pictures
+        return list.isEmpty ? Entity.mediaURLs(json["pic"]) : list
     }
 
     public var userAction: JSON { json["userAction"] }
@@ -156,7 +167,9 @@ public struct Entity: Identifiable, Sendable, Equatable {
                 let parts = trimmed.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
                 if parts.allSatisfy({ $0.hasPrefix("http") }) { return parts }
             }
-            guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme ?? ""), url.host != nil else {
+            let parsedURL = URL(string: trimmed)
+                ?? trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap(URL.init(string:))
+            guard let url = parsedURL, ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
                 return []
             }
             return [trimmed]
