@@ -19,6 +19,7 @@ struct FeedDetailView: View {
     @State private var replyTarget: Entity?
     @State private var draft = ""
     @State private var isSending = false
+    @State private var isShowingDeviceIdentity = false
     @FocusState private var composerFocused: Bool
     @State private var width: CGFloat = 900
 
@@ -111,6 +112,14 @@ struct FeedDetailView: View {
         .toolbar { toolbar }
         .sheet(item: $thread) { root in
             ReplyThreadSheet(root: root) { startReply(to: $0) }
+        }
+        .sheet(isPresented: $isShowingDeviceIdentity) {
+            DeviceIdentitySheet {
+                Task {
+                    await load(interactive: false)
+                    await replies?.refresh(interactive: false)
+                }
+            }
         }
         .task(id: ReplyKey(sort: sort, authorOnly: authorOnly)) {
             let client = app.client
@@ -217,6 +226,9 @@ struct FeedDetailView: View {
                     Task { await replies?.refresh(interactive: true) }
                 }
                 .keyActionButtonStyle()
+                if error.kind == .captcha {
+                    Button("设备标识") { isShowingDeviceIdentity = true }.buttonStyle(.glass)
+                }
                 if !app.isLoggedIn {
                     Button("登录") { app.isShowingLogin = true }.buttonStyle(.glass)
                 }
@@ -241,6 +253,9 @@ struct FeedDetailView: View {
             Spacer()
             if failure.kind == .authentication, !app.isLoggedIn {
                 Button("登录") { app.isShowingLogin = true }.buttonStyle(.glass)
+            }
+            if failure.kind == .captcha {
+                Button("设备标识") { isShowingDeviceIdentity = true }.buttonStyle(.glass)
             }
             Button(failure.kind == .captcha ? "完成验证" : "重试") {
                 Task { await load(interactive: true) }

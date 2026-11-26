@@ -8,7 +8,10 @@ let package = Package(
         .library(name: "CoolapkKit", targets: ["CoolapkKit"]),
     ],
     targets: [
-        .target(name: "CoolapkKit"),
+        .target(
+            name: "CoolapkKit",
+            linkerSettings: [.linkedLibrary("z")]
+        ),
         .executableTarget(name: "coolapk-probe", dependencies: ["CoolapkKit"]),
         .testTarget(
             name: "CoolapkKitTests",

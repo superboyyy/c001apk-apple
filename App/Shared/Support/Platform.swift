@@ -42,6 +42,15 @@ enum Platform {
         UIPasteboard.general.string = text
         #endif
     }
+
+    /// 仅在用户主动点击粘贴操作时读取剪贴板纯文本。
+    static func pasteText() -> String? {
+        #if os(macOS)
+        NSPasteboard.general.string(forType: .string)
+        #else
+        UIPasteboard.general.string
+        #endif
+    }
 }
 
 extension Color {

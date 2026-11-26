@@ -24,6 +24,7 @@ final class AppModel {
     let contentFilter = ContentFilterStore()
     let localFollow = LocalFollowStore()
     @ObservationIgnored let client: CoolapkClient
+    @ObservationIgnored private var szlmService: SzlmIdentityService!
     /// 首页信息流请求携带的毫秒时间戳，每次安装固定不变。
     @ObservationIgnored let installTime: String
 
@@ -32,6 +33,9 @@ final class AppModel {
     /// 本机登录过的全部账号。
     private(set) var accounts: [Account] = []
     private(set) var identity: ClientIdentity
+    private(set) var isFetchingSzlmID = false
+    /// 数盟获取状态或冷却时间更新时递增，用来驱动界面刷新。
+    private(set) var szlmStateRevision = 0
     var captcha: CaptchaRequest?
     var isShowingLogin = false
     /// 非空时在窗口上方浮出发布 / 回复编辑器。
@@ -76,7 +80,25 @@ final class AppModel {
         self.account = account
         let session = defaults.data(forKey: Self.sessionKey)
             .flatMap { try? JSONDecoder().decode(CoolapkClient.SessionCookie.self, from: $0) }
-        client = CoolapkClient(identity: identity, account: account, sessionCookie: session)
+        let apiClient = CoolapkClient(identity: identity, account: account, sessionCookie: session)
+        client = apiClient
+        let service = SzlmIdentityService(
+            readIdentity: { apiClient.identity },
+            apply: { [weak self] id in
+                guard let model = self else { return }
+                try await MainActor.run {
+                    try model.applySzlmID(id)
+                }
+            }
+        )
+        szlmService = service
+        service.onStateChange = { [weak self, weak service] in
+            guard let model = self, let service else { return }
+            Task { @MainActor in
+                model.isFetchingSzlmID = service.isFetching
+                model.szlmStateRevision &+= 1
+            }
+        }
 
         LivePhotoLoader.resolver = { [client] media in
             try? await client.livePhotoVideoURL(for: media)
@@ -192,13 +214,46 @@ final class AppModel {
         return false
     }
 
-    // MARK: 设备参数
+    // MARK: 设备参数与数盟标识
+
+    var hasSzlmID: Bool { identity.hasSzlmID }
+
+    var szlmNextAllowedAt: Date? {
+        _ = szlmStateRevision
+        return szlmService.nextAllowedAt
+    }
+
+    var szlmUnavailableReason: String? {
+        _ = szlmStateRevision
+        return szlmService.unavailableReason
+    }
+
+    func acquireSzlmID() async throws {
+        _ = try await szlmService.renewNow()
+        szlmStateRevision &+= 1
+    }
+
+    func importOfficialDeviceIdentity(_ text: String) throws {
+        var next = identity
+        try next.importOfficialDeviceIdentity(text)
+        apply(next)
+        client.resetSession()
+        szlmStateRevision &+= 1
+    }
+
+    private func applySzlmID(_ id: String) throws {
+        var next = identity
+        try next.applySzlmID(id)
+        apply(next)
+        client.resetSession()
+    }
 
     func regenerateDevice() {
         var next = identity
         next.regenerateDeviceCode()
         apply(next)
         client.resetSession()
+        szlmStateRevision &+= 1
         showToast("已重新生成设备参数")
     }
 

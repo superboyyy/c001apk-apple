@@ -70,6 +70,7 @@ private struct AccountSettings: View {
     @State private var versionCode = ""
     @State private var apiVersion = ""
     @State private var confirmsRegenerate = false
+    @State private var isShowingDeviceIdentity = false
 
     var body: some View {
         Form {
@@ -127,20 +128,31 @@ private struct AccountSettings: View {
                 Text("仅当服务端提示“客户端协议未被接受”时才需要调整。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("数盟设备标识") {
+                SzlmAcquisitionView(
+                    trailingActionTitle: "手动导入…",
+                    onTrailingAction: { isShowingDeviceIdentity = true }
+                )
+            }
             Section("设备") {
                 LabeledContent("兼容设备", value: "\(app.identity.manufacturer) \(app.identity.model) · Android \(app.identity.androidVersion)")
                 Button("重新生成设备参数…") { confirmsRegenerate = true }
-                Text("本应用以一组固定的兼容参数访问酷安接口，不读取这台 Mac 的硬件信息。重新生成后可能需要再次完成人机验证。")
+                Text("本应用以一组固定的兼容参数访问酷安接口，不读取这台设备的硬件信息。重新生成后可能需要再次完成人机验证。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .onAppear(perform: sync)
+        .sheet(isPresented: $isShowingDeviceIdentity) {
+            DeviceIdentitySheet()
+        }
         .confirmationDialog("重新生成设备参数？", isPresented: $confirmsRegenerate) {
             Button("重新生成", role: .destructive) { app.regenerateDevice() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("会生成新的安装标识并清除当前会话。")
+            Text(app.hasSzlmID
+                 ? "会生成新的随机安装标识，并清除已保存的数盟 ID 与当前会话。"
+                 : "会生成新的安装标识并清除当前会话。")
         }
     }
 

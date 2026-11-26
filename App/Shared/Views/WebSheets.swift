@@ -9,6 +9,7 @@ import WebKit
 struct CaptchaSheet: View {
     let request: CaptchaRequest
     @State private var reloadToken = 0
+    @State private var showingHelp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,6 +17,27 @@ struct CaptchaSheet: View {
                 Label("人机验证", systemImage: "checkmark.shield")
                     .font(.headline)
                 Spacer()
+                Button {
+                    showingHelp = true
+                } label: {
+                    Label("重复验证帮助", systemImage: "questionmark.circle")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.glass)
+                .help("反复出现人机验证？")
+                .popover(isPresented: $showingHelp) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("反复出现人机验证？").font(.headline)
+                        Text("可在“设置 → 账号与设备 → 数盟设备标识”里获取数盟 ID，或从 Android 官方酷安同一页面点击“复制 OAID”5 次后粘贴完整内容手动导入。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Link("仓库图文说明", destination: OfficialDeviceIdentity.guideURL)
+                            .font(.callout)
+                    }
+                    .padding(14)
+                    .frame(width: 280)
+                }
                 Button {
                     reloadToken += 1
                 } label: {
