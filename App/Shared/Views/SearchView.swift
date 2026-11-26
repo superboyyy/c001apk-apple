@@ -6,6 +6,7 @@ struct SearchView: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
+    @Environment(\.isActiveRoute) private var isActiveRoute
 
     @State private var text = ""
     @State private var keyword = ""
@@ -13,6 +14,7 @@ struct SearchView: View {
     @State private var feedType: CoolapkClient.SearchFeedType = .all
     @State private var sort: CoolapkClient.SearchSort = .default
     @State private var model: PagedList?
+    @State private var builtQuery: Query?
 
     private struct Query: Hashable {
         let keyword: String
@@ -28,18 +30,21 @@ struct SearchView: View {
             if keyword.isEmpty {
                 suggestions
             } else if let model {
-                EntityListView(model: model) {
-                    GlassTabBar(items: CoolapkClient.SearchKind.allCases, selection: $kind) { $0.title }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                ZStack {
+                    EntityListView(model: model) {
+                        GlassTabBar(items: CoolapkClient.SearchKind.allCases, selection: $kind) { $0.title }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .id(query)
+                    .transition(.opacity)
                 }
-                .id(query)
             }
         }
-        .navigationTitle(keyword.isEmpty ? "搜索" : "“\(keyword)”")
+        .routeTitle(keyword.isEmpty ? "搜索" : "“\(keyword)”")
         .searchable(text: $text, placement: .toolbar, prompt: "搜索动态、应用、用户、话题")
         .onSubmit(of: .search) { submit(text) }
         .toolbar {
-            if !keyword.isEmpty, kind == .feed {
+            if isActiveRoute, !keyword.isEmpty, kind == .feed {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Picker("类型", selection: $feedType) {
@@ -85,16 +90,23 @@ struct SearchView: View {
             return
         }
         app.library.recordSearch(trimmed)
+        if !isActiveRoute, navigator.selection == .search {
+            navigator.popToRoot()
+        }
         keyword = trimmed
     }
 
     private func rebuild() {
         guard !keyword.isEmpty else {
+            builtQuery = nil
             model = nil
             return
         }
-        let client = app.client
         let current = query
+        // 从搜索结果点进帖子/用户再返回时，保留搜索列表与滚动位置。
+        guard builtQuery != current || model == nil else { return }
+        builtQuery = current
+        let client = app.client
         model = PagedList { request in
             try await client.search(keyword: current.keyword, kind: current.kind, feedType: current.feedType,
                                     sort: current.sort, page: request.page,

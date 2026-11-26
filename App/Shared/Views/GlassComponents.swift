@@ -135,11 +135,25 @@ struct CardBackground: ViewModifier {
     var padding: CGFloat = 14
     var interactive = false
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular.interactive(interactive), in: .rect(cornerRadius: 18, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        if interactive {
+            content
+                .padding(padding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .glassEffect(.regular.interactive(), in: shape)
+        } else {
+            // 非交互容器卡片（图标入口网格、横滑图文卡片、详情正文等）把玻璃画在背景层，
+            // 避免把子按钮的 `.matchedTransitionSource` 包进玻璃的 SDFLayer / portal 视图内导致 iPadOS 缩放锚点失效。
+            content
+                .padding(padding)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    Color.clear
+                        .glassEffect(.regular, in: shape)
+                }
+        }
     }
 }
 

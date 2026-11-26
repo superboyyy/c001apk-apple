@@ -23,21 +23,25 @@ struct TopicView: View {
     @State private var selectedTab = ""
     @State private var lists: [String: PagedList] = [:]
     @State private var isFollowing = false
+    @State private var loadedTarget: Target?
 
     var body: some View {
         Group {
             if let detail {
                 if let list = lists[selectedTab] {
-                    EntityListView(model: list) {
-                        TopicHeader(detail: detail, target: target, isFollowing: $isFollowing)
-                        if tabs.count > 1 {
-                            GlassTabBar(items: tabs.map(\.key), selection: $selectedTab) { key in
-                                tabs.first { $0.key == key }?.title ?? key
+                    ZStack {
+                        EntityListView(model: list) {
+                            TopicHeader(detail: detail, target: target, isFollowing: $isFollowing)
+                            if tabs.count > 1 {
+                                GlassTabBar(items: tabs.map(\.key), selection: $selectedTab) { key in
+                                    tabs.first { $0.key == key }?.title ?? key
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .id(selectedTab)
+                        .transition(.opacity)
                     }
-                    .id(selectedTab)
                 } else {
                     ScrollView {
                         TopicHeader(detail: detail, target: target, isFollowing: $isFollowing).padding(16)
@@ -52,8 +56,12 @@ struct TopicView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(detail?.title ?? title)
-        .task(id: target) { await load(interactive: false) }
+        .routeTitle(detail?.title ?? title)
+        .task(id: target) {
+            // 从帖子返回时保留当前板块分页、已加载列表与滚动位置。
+            guard loadedTarget != target || detail == nil else { return }
+            await load(interactive: false)
+        }
     }
 
     private var title: String {
@@ -92,6 +100,7 @@ struct TopicView: View {
             selectedTab = preferred ?? items.first?.key ?? ""
             isFollowing = loaded.userAction["follow"].int == 1
             detail = loaded
+            loadedTarget = target
         } catch {
             failure = APIError.from(error)
         }
@@ -181,19 +190,28 @@ struct CategoryBrowser: View {
     var body: some View {
         Group {
             if !categories.isEmpty {
+                let selectionBinding = Binding<UUID?>(
+                    get: { selection },
+                    set: { next in withAnimation(RouteMotion.tab) { selection = next } }
+                )
                 HStack(spacing: 0) {
-                    List(categories, selection: $selection) { category in
+                    List(categories, selection: selectionBinding) { category in
                         Text(category.title).font(.system(size: 13)).lineLimit(1).tag(category.id)
                     }
                     .listStyle(.sidebar)
                     .scrollContentBackground(.hidden)
                     .frame(width: 148)
                     Divider()
-                    if let selection, let list = lists[selection] {
-                        EntityListView(model: list).id(selection)
-                    } else {
-                        Color.clear
+                    ZStack {
+                        if let selection, let list = lists[selection] {
+                            EntityListView(model: list)
+                                .id(selection)
+                                .transition(.opacity)
+                        } else {
+                            Color.clear
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else if let failure {
                 FailureView(error: failure) { interactive in
@@ -203,11 +221,65 @@ struct CategoryBrowser: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task { if categories.isEmpty { await load(interactive: false) } }
+        .task {
+            if categories.isEmpty {
+                restoreCachedCategories()
+                await load(interactive: false, silent: !categories.isEmpty)
+            }
+        }
     }
 
-    private func load(interactive: Bool) async {
-        failure = nil
+    private var kindKey: String { kind == .topics ? "topics" : "products" }
+    private var categoryCacheKey: String { "categories-\(kindKey)" }
+
+    private func restoreCachedCategories() {
+        guard let cached = FeedCache.shared.load(key: categoryCacheKey, scope: app.cacheScope) else { return }
+        applyCategories(cached.items, preserveExisting: false)
+    }
+
+    private func applyCategories(_ rows: [Entity], preserveExisting: Bool) {
+        let app = app
+        let client = app.client
+        var existingByURL: [String: (entity: Entity, list: PagedList)] = [:]
+        if preserveExisting {
+            for item in categories {
+                if let list = lists[item.id] { existingByURL[item.url] = (item, list) }
+            }
+        }
+        let selectedURL = selection.flatMap { id in categories.first { $0.id == id }?.url }
+
+        var created: [UUID: PagedList] = [:]
+        var kept: [Entity] = []
+        for row in rows {
+            guard case .route(.page(let url, _)) = LinkRouter.resolve(row.url, title: row.title) else { continue }
+            if let existing = existingByURL[row.url] {
+                let updated = Entity(id: existing.entity.id, json: row.json)
+                created[updated.id] = existing.list
+                kept.append(updated)
+            } else {
+                let title = row.title
+                created[row.id] = PagedList(
+                    cacheKey: "cat-\(kindKey)-\(url)",
+                    cacheScope: { app.cacheScope }
+                ) { request in
+                    try await client.dataList(url: url, title: title, page: request.page,
+                                              firstItem: request.firstItem, lastItem: request.lastItem)
+                }
+                kept.append(row)
+            }
+        }
+        guard !kept.isEmpty else { return }
+        lists = created
+        categories = kept
+        if let selectedURL, let matched = kept.first(where: { $0.url == selectedURL }) {
+            selection = matched.id
+        } else {
+            selection = kept.first?.id
+        }
+    }
+
+    private func load(interactive: Bool, silent: Bool = false) async {
+        if !silent { failure = nil }
         let client = app.client
         do {
             let fetch: () async throws -> EntityPage = {
@@ -226,23 +298,14 @@ struct CategoryBrowser: View {
             case .topics: rows = page.items.first { $0.entityTemplate == "verticalColumnsFullPageCard" }?.entities ?? []
             case .products: rows = page.items.filter { $0.entityType == "productBrand" }
             }
-            var created: [UUID: PagedList] = [:]
-            var kept: [Entity] = []
-            for row in rows {
-                guard case .route(.page(let url, _)) = LinkRouter.resolve(row.url, title: row.title) else { continue }
-                let title = row.title
-                created[row.id] = PagedList { request in
-                    try await client.dataList(url: url, title: title, page: request.page,
-                                              firstItem: request.firstItem, lastItem: request.lastItem)
-                }
-                kept.append(row)
+            if !rows.isEmpty {
+                FeedCache.shared.save(EntityPage(items: rows), key: categoryCacheKey, scope: app.cacheScope)
+                applyCategories(rows, preserveExisting: silent)
+            } else if !silent {
+                failure = APIError(.invalidResponse, "没有可用的分类")
             }
-            lists = created
-            categories = kept
-            selection = kept.first?.id
-            if kept.isEmpty { failure = APIError(.invalidResponse, "没有可用的分类") }
         } catch {
-            failure = APIError.from(error)
+            if !silent { failure = APIError.from(error) }
         }
     }
 }

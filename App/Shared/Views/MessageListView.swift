@@ -90,6 +90,7 @@ final class ConversationList {
     func refresh(interactive: Bool = false) async {
         generation += 1
         let current = generation
+        isLoadingMore = false
         if items.isEmpty { phase = .loading }
         moreError = nil
         do {
@@ -205,8 +206,9 @@ struct MessageListView: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
+    @Environment(\.isActiveRoute) private var isActiveRoute
     @State private var model: ConversationList?
-    @State private var opened: ChatPeer?
+    @State private var openedChat = false
     @State private var pendingDelete: Conversation?
 
     var body: some View {
@@ -219,14 +221,16 @@ struct MessageListView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle("私信")
-        .navigationDestination(item: $opened) { ChatView(peer: $0) }
-        .onChange(of: opened) { old, new in
+        .routeTitle("私信")
+        .onChange(of: navigator.currentEntries.isEmpty) { _, isEmpty in
             // 从聊天页返回后悄悄刷新一次，更新最近消息和未读数。
-            if old != nil, new == nil, let model { Task { await model.refresh() } }
+            if isEmpty, navigator.selection == .messages, openedChat, let model {
+                openedChat = false
+                Task { await model.refresh() }
+            }
         }
         .toolbar {
-            if let model, app.isLoggedIn {
+            if isActiveRoute, let model, app.isLoggedIn {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         Task { await model.refresh(interactive: true) }
@@ -295,8 +299,9 @@ struct MessageListView: View {
 
     private func row(_ conversation: Conversation, model: ConversationList) -> some View {
         let isBusy = model.busy.contains(conversation.id)
+        let zoomID = "chat-row-\(conversation.id)"
         return Button {
-            open(conversation, model: model)
+            open(conversation, model: model, zoomID: zoomID)
         } label: {
             HStack(spacing: 12) {
                 AvatarView(url: conversation.peer.avatar, size: 42)
@@ -339,6 +344,7 @@ struct MessageListView: View {
         }
         .buttonStyle(.plain)
         .card(padding: 12, interactive: true)
+        .zoomTransitionSource(id: zoomID)
         .disabled(isBusy)
         .contextMenu {
             Button(conversation.isPinned ? "取消置顶" : "置顶会话", systemImage: conversation.isPinned ? "pin.slash" : "pin") {
@@ -368,12 +374,13 @@ struct MessageListView: View {
         }
     }
 
-    private func open(_ conversation: Conversation, model: ConversationList) {
+    private func open(_ conversation: Conversation, model: ConversationList, zoomID: String) {
         model.markRead(conversation.id)
         if let onOpenChat {
             onOpenChat(conversation.peer)
         } else {
-            opened = conversation.peer
+            openedChat = true
+            navigator.push(.chat(conversation.peer), zoomID: zoomID)
         }
     }
 

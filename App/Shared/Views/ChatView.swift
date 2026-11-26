@@ -267,6 +267,7 @@ struct ChatView: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
+    @Environment(\.isActiveRoute) private var isActiveRoute
 
     @State private var model: ChatModel?
     @State private var draft = ""
@@ -287,21 +288,23 @@ struct ChatView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(peer.username.isEmpty ? "私信" : peer.username)
+        .routeTitle(peer.username.isEmpty ? "私信" : peer.username)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button("查看用户", systemImage: "person") { navigator.push(.user(peer.uid)) }
-                    Button("重新加载聊天记录", systemImage: "arrow.clockwise") {
-                        Task { await model?.load(interactive: true) }
+            if isActiveRoute {
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button("查看用户", systemImage: "person") { navigator.push(.user(peer.uid)) }
+                        Button("重新加载聊天记录", systemImage: "arrow.clockwise") {
+                            Task { await model?.load(interactive: true) }
+                        }
+                        Divider()
+                        Button("屏蔽 \(peer.username)（仅本机）", systemImage: "hand.raised") {
+                            app.library.block(uid: peer.uid, username: peer.username)
+                            app.showToast("已在本机屏蔽 \(peer.username)")
+                        }
+                    } label: {
+                        Label("更多", systemImage: "ellipsis")
                     }
-                    Divider()
-                    Button("屏蔽 \(peer.username)（仅本机）", systemImage: "hand.raised") {
-                        app.library.block(uid: peer.uid, username: peer.username)
-                        app.showToast("已在本机屏蔽 \(peer.username)")
-                    }
-                } label: {
-                    Label("更多", systemImage: "ellipsis")
                 }
             }
         }
@@ -547,6 +550,7 @@ struct ChatView: View {
 private struct ChatBubble: View {
     /// 气泡要显示的内容，历史消息和本机发出的消息都归一成这个形状。
     struct Message {
+        var id: String
         var html: String
         var picture: String
         var localImage: CGImage?
@@ -559,6 +563,7 @@ private struct ChatBubble: View {
         var isFailed = false
 
         init(entity: Entity, myUID: String, fallbackAvatar: String) {
+            id = entity.id.uuidString
             html = entity.message
             picture = entity["message_pic"].string ?? ""
             senderUID = entity["fromuid"].string ?? ""
@@ -570,6 +575,7 @@ private struct ChatBubble: View {
 
         init(delivery: ChatDelivery, myUID: String, avatar: String) {
             let sent = delivery.acknowledged
+            id = delivery.id.uuidString
             html = sent?.message.isEmpty == false ? sent!.message : RichText.escape(delivery.text)
             picture = sent?["message_pic"].text ?? delivery.uploadedPicture ?? ""
             // 确认送达之前显示本地图片。
@@ -649,12 +655,14 @@ private struct ChatBubble: View {
     }
 
     private var avatarButton: some View {
-        Button {
-            if !message.senderUID.isEmpty { navigator.push(.user(message.senderUID)) }
+        let avatarZoomID = "chat-avatar-\(message.id)"
+        return Button {
+            if !message.senderUID.isEmpty { navigator.push(.user(message.senderUID), zoomID: avatarZoomID) }
         } label: {
             AvatarView(url: message.avatar, size: 36)
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: avatarZoomID, cornerRadius: 18)
         .accessibilityLabel(message.isMine ? "我的主页" : "对方的主页")
     }
 
@@ -685,10 +693,11 @@ private struct ChatBubble: View {
     @ViewBuilder
     private var textBubble: some View {
         let size = app.settings.fontSize
+        let feedZoomID = feedID == nil ? nil : "chat-feed-\(message.id)"
         Group {
             if let feedID {
                 Button {
-                    navigator.push(.feed(id: feedID))
+                    navigator.push(.feed(id: feedID), zoomID: feedZoomID)
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc.text")
@@ -714,6 +723,7 @@ private struct ChatBubble: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .glassEffect(message.isMine ? .regular.tint(.brandFill) : .regular, in: bubbleShape)
+        .zoomTransitionSource(id: feedZoomID, cornerRadius: 16)
     }
 
     @ViewBuilder
@@ -756,8 +766,9 @@ private struct ChatBubble: View {
     }
 
     private var extraCard: some View {
-        Button {
-            navigator.open(message.extraURL, title: message.extraTitle, app: app)
+        let extraZoomID = "chat-extra-\(message.id)"
+        return Button {
+            navigator.open(message.extraURL, title: message.extraTitle, app: app, zoomID: extraZoomID)
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Image(systemName: "doc.text")
@@ -772,6 +783,7 @@ private struct ChatBubble: View {
         }
         .buttonStyle(.plain)
         .card(padding: 10, interactive: true)
+        .zoomTransitionSource(id: extraZoomID)
         .frame(maxWidth: 260)
     }
 

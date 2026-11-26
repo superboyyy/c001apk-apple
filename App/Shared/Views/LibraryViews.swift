@@ -8,6 +8,7 @@ struct SavedFeedList: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
+    @Environment(\.isActiveRoute) private var isActiveRoute
     @State private var confirmsClear = false
 
     private var items: [SavedFeed] { kind == .favorites ? app.library.favorites : app.library.history }
@@ -34,7 +35,7 @@ struct SavedFeedList: View {
             }
         }
         .toolbar {
-            if kind == .history, !items.isEmpty {
+            if isActiveRoute, kind == .history, !items.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         confirmsClear = true
@@ -54,8 +55,9 @@ struct SavedFeedList: View {
     }
 
     private func row(_ item: SavedFeed) -> some View {
-        Button {
-            navigator.push(.feed(id: item.id))
+        let zoomID = "saved-\(kind == .favorites ? "fav" : "hist")-\(item.id)"
+        return Button {
+            navigator.push(.feed(id: item.id), zoomID: zoomID)
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 AvatarView(url: item.avatar, size: 36)
@@ -83,6 +85,7 @@ struct SavedFeedList: View {
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .zoomTransitionSource(id: zoomID)
         .contextMenu {
             Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(item.id)") }
             Button(kind == .favorites ? "取消收藏" : "从历史中移除", role: .destructive) {
@@ -123,19 +126,23 @@ struct NotificationsView: View {
 
     var body: some View {
         if app.isLoggedIn {
+            let app = app
             let client = app.client
             let current = kind
             let model = app.list("notifications-\(current.rawValue)") {
-                PagedList { request in
+                PagedList(cacheKey: "notifications-\(current.rawValue)", cacheScope: { app.cacheScope }) { request in
                     try await client.list(path: current.path, page: request.page,
                                           firstItem: request.firstItem, lastItem: request.lastItem)
                 }
             }
-            EntityListView(model: model, layout: .single(maxWidth: 720)) {
-                GlassTabBar(items: Kind.allCases, selection: $kind) { $0.title }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            ZStack {
+                EntityListView(model: model, layout: .single(maxWidth: 720)) {
+                    GlassTabBar(items: Kind.allCases, selection: $kind) { $0.title }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .id(current)
+                .transition(.opacity)
             }
-            .id(current)
         } else {
             LoginRequiredView(message: "登录后可以查看 @我、评论、赞和系统通知。")
         }

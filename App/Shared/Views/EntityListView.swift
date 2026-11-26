@@ -18,6 +18,7 @@ struct EntityListView<Header: View>: View {
     @ViewBuilder var header: () -> Header
 
     @Environment(AppModel.self) private var app
+    @Environment(\.isActiveRoute) private var isActiveRoute
     @State private var showsTopButton = false
     /// 排版实际采用的内容宽度。瀑布流下只在容器宽度稳定后才更新，见 `widthChanged`。
     @State private var layoutWidth: CGFloat?
@@ -36,7 +37,7 @@ struct EntityListView<Header: View>: View {
     /// 卡片的最小舒适宽度；窗口能放几列就放几列。
     private static var minimumColumnWidth: CGFloat { 280 }
     /// 距底部多远时开始加载下一页。
-    private static var preloadDistance: CGFloat { 1500 }
+    private static var preloadDistance: CGFloat { 600 }
 
     private var columns: Int {
         switch layout {
@@ -163,6 +164,14 @@ struct EntityListView<Header: View>: View {
         }
         .scrollPosition($position)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .modifier(OptionalRefreshable(enabled: showsRefreshButton) {
+            let failure = await Task { @MainActor in
+                await model.refresh(interactive: true)
+            }.value
+            if let failure, !model.items.isEmpty {
+                app.report(failure)
+            }
+        })
         .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, value in
             scroll.offset = value
             if !scroll.isReflowing { scroll.pickAnchor() }
@@ -178,11 +187,21 @@ struct EntityListView<Header: View>: View {
         }
         // 离底部还有一段距离就开始加载下一页，连续滚动时不必等到见底。
         .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y + geometry.containerSize.height > geometry.contentSize.height - Self.preloadDistance
+            guard geometry.contentSize.height > 1, geometry.containerSize.height > 1 else { return false }
+            return geometry.contentOffset.y + geometry.containerSize.height > geometry.contentSize.height - Self.preloadDistance
         } action: { _, value in
             isNearBottom = value
         }
-        .task(id: MoreTrigger(isNearBottom: isNearBottom, count: model.items.count, isLoading: model.isLoadingMore)) {
+        .task(id: MoreTrigger(
+            isNearBottom: isNearBottom,
+            isLoaded: model.phase == .loaded,
+            hidesContent: hidesContent,
+            count: model.items.count,
+            isLoading: model.isLoadingMore,
+            isRefreshing: model.isRefreshing,
+            hasError: model.moreError != nil,
+            autoLoadPaused: model.autoLoadPaused
+        )) {
             if isNearBottom, !hidesContent { model.requestMore() }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -201,18 +220,26 @@ struct EntityListView<Header: View>: View {
                 .transition(.scale.combined(with: .opacity))
             }
         }
-        .task(id: model.phase == .idle) { model.loadIfNeeded() }
+        .task(id: LoadTrigger(isIdle: model.phase == .idle,
+                              needsSilentRefresh: model.needsSilentRefresh,
+                              resetCount: model.resetCount)) {
+            model.loadIfNeeded()
+        }
         .toolbar {
-            if showsRefreshButton {
+            if showsRefreshButton, isActiveRoute {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        Task { await model.refresh(interactive: true) }
+                        Task {
+                            if let failure = await model.refresh(interactive: true), !model.items.isEmpty {
+                                app.report(failure)
+                            }
+                        }
                     } label: {
                         Label("刷新", systemImage: "arrow.clockwise")
                     }
                     .keyboardShortcut("r", modifiers: .command)
                     .help("刷新（⌘R）")
-                    .disabled(model.phase == .loading)
+                    .disabled(model.phase == .loading || (model.isRefreshing && !model.isSilentRefreshing))
                 }
             }
         }
@@ -242,8 +269,8 @@ struct EntityListView<Header: View>: View {
             } else {
                 let leading = leadingCardCount(in: items)
                 if leading > 0 {
-                    // 与瀑布流并列（不是嵌套）的懒加载栈：滚过去之后这些卡片可以被回收。
-                    LazyVStack(spacing: 12) {
+                    // 顶部推广卡片（横幅、图标入口、横滑标签）数量极少，直接常驻避免回收导致缩放过渡锚点丢失。
+                    VStack(spacing: 12) {
                         ForEach(items.prefix(leading)) { tracked($0) }
                     }
                 }
@@ -285,8 +312,22 @@ struct EntityListView<Header: View>: View {
                 }
             } else if model.reachedEnd {
                 Text("没有更多了").font(.callout).foregroundStyle(.tertiary)
-            } else {
+            } else if model.isLoadingMore || model.isRefreshing {
                 ProgressView().controlSize(.small)
+            } else if model.autoLoadPaused {
+                Button("继续加载") {
+                    Task { await model.loadMore(interactive: true) }
+                }
+                .buttonStyle(.glass)
+            } else {
+                // 外层是非懒加载 VStack，footer 始终处于挂载状态：切勿在此加 `.onAppear` 触发翻页，
+                // 否则每次刷新或翻页结束切换回按钮分支时都会立刻再次触发 `requestMore()`，造成无限连拉。
+                Button("加载更多") {
+                    Task { await model.loadMore(interactive: true) }
+                }
+                .buttonStyle(.plain)
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 56)
@@ -337,11 +378,44 @@ final class ScrollOffsetBox {
     }
 }
 
+/// iPadOS 支持顶部下拉刷新，macOS 保持原生滚动条行为。
+private struct OptionalRefreshable: ViewModifier {
+    let enabled: Bool
+    let action: @MainActor @Sendable () async -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content
+        #else
+        if enabled {
+            content.refreshable {
+                await action()
+            }
+        } else {
+            content
+        }
+        #endif
+    }
+}
+
 /// 触发加载下一页的条件；任何一项变化都重新判断一次。
 private struct MoreTrigger: Equatable {
     var isNearBottom: Bool
+    var isLoaded: Bool
+    var hidesContent: Bool
     var count: Int
     var isLoading: Bool
+    var isRefreshing: Bool
+    var hasError: Bool
+    var autoLoadPaused: Bool
+}
+
+/// 触发首屏加载或缓存无感刷新的条件。
+private struct LoadTrigger: Equatable {
+    var isIdle: Bool
+    var needsSilentRefresh: Bool
+    var resetCount: Int
 }
 
 /// 瀑布流的分列结果：按估算高度把每张卡片放进当前最短的一列。
@@ -467,7 +541,10 @@ enum MasonryMetrics {
         if entity.forwardSource != nil { height += 70 }
         if !entity.extraTitle.isEmpty, !entity.extraURL.isEmpty { height += 66 }
         if entity.targetRow != nil || !entity.relationRows.isEmpty || !entity.topicTitle.isEmpty { height += 34 }
-        if showsReplyPreview, let reply = entity.replyRows.first, !reply.message.isEmpty { height += 48 }
+        if showsReplyPreview, let reply = entity.replyRows.first,
+           !reply.message.isEmpty || !reply.replyPictures.isEmpty {
+            height += reply.replyPictures.isEmpty ? 48 : 74
+        }
         return height + 40
     }
 }

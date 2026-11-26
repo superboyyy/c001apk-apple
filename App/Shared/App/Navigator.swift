@@ -49,51 +49,137 @@ enum SidebarItem: String, Hashable, CaseIterable, Identifiable {
 @Observable
 final class Navigator {
     var selection: SidebarItem = .home
-    var paths: [SidebarItem: [Route]] = [:]
+    var paths: [SidebarItem: [NavigationEntry]] = [:]
+    #if !os(macOS)
+    /// iPadOS 每个侧边栏页签各自维护一个 `NavigationPath`，支持区分缩放与普通目的地类型。
+    var navigationPaths: [SidebarItem: NavigationPath] = [:]
+
+    var currentNavigationPath: NavigationPath {
+        get { navigationPaths[selection] ?? NavigationPath() }
+        set {
+            navigationPaths[selection] = newValue
+            // 用户侧滑或点返回按钮弹栈时，同步裁剪 `paths[selection]` 保持一致。
+            var list = paths[selection] ?? []
+            if newValue.count < list.count {
+                list.removeLast(list.count - newValue.count)
+                paths[selection] = list
+            }
+        }
+    }
+    #endif
     /// 由工具栏搜索框或菜单命令设置。
     var pendingSearch: String?
+    /// 详情区域在窗口坐标系里的矩形，用于计算 macOS 卡片点击的动画锚点。
+    @ObservationIgnored var detailFrame: CGRect = .zero
 
-    var currentPath: [Route] {
+    var currentEntries: [NavigationEntry] {
         get { paths[selection] ?? [] }
         set { paths[selection] = newValue }
     }
 
-    func push(_ route: Route) {
-        if currentPath.last == route { return }
-        currentPath.append(route)
+    /// 兼容调用方读取当前路由列表。
+    var currentPath: [Route] {
+        currentEntries.map(\.route)
+    }
+
+    func entries(for item: SidebarItem) -> [NavigationEntry] {
+        paths[item] ?? []
+    }
+
+    func select(_ item: SidebarItem) {
+        guard selection != item else { return }
+        #if os(macOS)
+        withAnimation(RouteMotion.tab) { selection = item }
+        #else
+        selection = item
+        #endif
+    }
+
+    func push(_ route: Route, zoomID: String? = nil, origin: UnitPoint? = nil) {
+        #if !os(macOS)
+        // 若系统弹栈与镜像数组短暂不同步，先按真实 NavigationPath 长度对齐，避免误判“已在栈顶”而点不开。
+        let activeCount = navigationPaths[selection]?.count ?? 0
+        if var list = paths[selection], list.count > activeCount {
+            list.removeLast(list.count - activeCount)
+            paths[selection] = list
+        }
+        #endif
+        if currentEntries.last?.route == route { return }
+        let resolvedOrigin = origin ?? ClickOrigin.current(in: detailFrame)
+        let normalizedZoomID = zoomID.flatMap { $0.isEmpty ? nil : $0 }
+        let entry = NavigationEntry(route: route, origin: resolvedOrigin, zoomID: normalizedZoomID)
+        #if os(macOS)
+        withAnimation(RouteMotion.open) { currentEntries.append(entry) }
+        #else
+        currentEntries.append(entry)
+        var path = navigationPaths[selection] ?? NavigationPath()
+        if let normalizedZoomID {
+            path.append(ZoomedNavigationEntry(id: entry.id, route: route, zoomID: normalizedZoomID))
+        } else {
+            path.append(PlainNavigationEntry(id: entry.id, route: route))
+        }
+        navigationPaths[selection] = path
+        #endif
     }
 
     /// 文字链接位于可点击的卡片内。点链接不能同时打开卡片，
     /// 所以卡片点击会推迟一拍，紧跟在链接点击之后的则忽略。
     @ObservationIgnored private var lastLinkActivation = Date.distantPast
+    /// 同一轮点击同时命中正文并发手势与外层卡片（或嵌套引用卡片）时，只响应最内层的一次。
+    @ObservationIgnored private var lastCardActivation = Date.distantPast
 
     func noteLinkActivated() { lastLinkActivation = Date() }
 
-    func openCard(_ route: Route) {
-        DispatchQueue.main.async { [self] in
+    func openCard(_ route: Route, zoomID: String? = nil) {
+        let now = Date()
+        guard now.timeIntervalSince(lastCardActivation) > 0.08 else { return }
+        lastCardActivation = now
+        let capturedOrigin = ClickOrigin.current(in: detailFrame)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [self] in
             guard Date().timeIntervalSince(lastLinkActivation) > 0.35 else { return }
-            push(route)
+            push(route, zoomID: zoomID, origin: capturedOrigin)
         }
     }
 
-    func openCardLink(_ link: String, title: String? = nil, app: AppModel) {
-        DispatchQueue.main.async { [self] in
+    func openCardLink(_ link: String, title: String? = nil, app: AppModel, zoomID: String? = nil) {
+        let now = Date()
+        guard now.timeIntervalSince(lastCardActivation) > 0.08 else { return }
+        lastCardActivation = now
+        let capturedOrigin = ClickOrigin.current(in: detailFrame)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [self] in
             guard Date().timeIntervalSince(lastLinkActivation) > 0.35 else { return }
-            open(link, title: title, app: app)
+            open(link, title: title, app: app, zoomID: zoomID, origin: capturedOrigin)
         }
     }
 
     func pop() {
-        if !currentPath.isEmpty { currentPath.removeLast() }
+        guard !currentEntries.isEmpty else { return }
+        #if os(macOS)
+        withAnimation(RouteMotion.close) { _ = currentEntries.removeLast() }
+        #else
+        currentEntries.removeLast()
+        if var path = navigationPaths[selection], !path.isEmpty {
+            path.removeLast()
+            navigationPaths[selection] = path
+        }
+        #endif
     }
 
-    func popToRoot() { currentPath.removeAll() }
+    func popToRoot() {
+        guard !currentEntries.isEmpty else { return }
+        #if os(macOS)
+        withAnimation(RouteMotion.close) { currentEntries.removeAll() }
+        #else
+        currentEntries.removeAll()
+        navigationPaths[selection] = NavigationPath()
+        #endif
+    }
 
     /// 按链接类型打开酷安链接：应用内页面、图片查看器或浏览器。
-    func open(_ link: String, title: String? = nil, app: AppModel) {
+    func open(_ link: String, title: String? = nil, app: AppModel, zoomID: String? = nil, origin: UnitPoint? = nil) {
         switch LinkRouter.resolve(link, title: title) {
         case .route(let route):
-            push(route)
+            push(route, zoomID: zoomID, origin: origin)
         case .image(let url):
             ImageViewer.show(urls: [url], index: 0)
         case .external(let url):
@@ -104,7 +190,7 @@ final class Navigator {
     }
 
     func search(_ keyword: String) {
-        selection = .search
+        select(.search)
         popToRoot()
         pendingSearch = keyword
     }

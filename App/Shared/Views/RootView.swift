@@ -7,6 +7,8 @@ struct RootView: View {
 
     #if os(macOS)
     @Environment(\.openSettings) private var openSettings
+    #else
+    @Namespace private var zoomNamespace
     #endif
 
     private func showSettings() {
@@ -39,7 +41,7 @@ struct RootView: View {
         func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
         switch url.host ?? "" {
         case "search":
-            if let query = value("q"), !query.isEmpty { navigator.search(query) } else { navigator.selection = .search }
+            if let query = value("q"), !query.isEmpty { navigator.search(query) } else { navigator.select(.search) }
         case "open":
             if let link = value("u"), !link.isEmpty {
                 navigator.noteLinkActivated()
@@ -53,7 +55,7 @@ struct RootView: View {
             // URL 的主机名会被转成小写，按不区分大小写匹配。
             let host = (url.host ?? "").lowercased()
             if let item = SidebarItem.allCases.first(where: { $0.rawValue.lowercased() == host }) {
-                navigator.selection = item
+                navigator.select(item)
             }
         }
     }
@@ -65,21 +67,43 @@ struct RootView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } detail: {
-            NavigationStack(path: $navigator.currentPath) {
+            #if os(macOS)
+            AnimatedNavigationStack(tab: navigator.selection, navigator: navigator) { item in
+                SidebarRootView(item: item)
+                    .safeAreaPadding(.leading, railInset)
+                    .hidesBarBackground()
+                    .inlineNavigationTitle()
+            } destination: { entry in
+                RouteView(route: entry.route)
+                    .safeAreaPadding(.leading, railInset)
+                    .inlineNavigationTitle()
+                    .hidesBarBackground()
+            }
+            #else
+            NavigationStack(path: $navigator.currentNavigationPath) {
                 SidebarRootView(item: navigator.selection)
                     .navigationTitle(navigator.selection.title)
                     .safeAreaPadding(.leading, railInset)
                     .hidesBarBackground()
                     .inlineNavigationTitle()
-                    .navigationDestination(for: Route.self) { route in
-                        // 所有页面都不要导航栏底色：工具栏的玻璃控件直接浮在内容上。
-                        // 要逐页设置，因为每个推入的页面各自上报工具栏偏好。
-                        RouteView(route: route)
+                    .navigationDestination(for: ZoomedNavigationEntry.self) { entry in
+                        RouteView(route: entry.route)
                             .safeAreaPadding(.leading, railInset)
                             .inlineNavigationTitle()
                             .hidesBarBackground()
+                            .environment(\.zoomNamespace, zoomNamespace)
+                            .navigationTransition(.zoom(sourceID: entry.zoomID, in: zoomNamespace))
+                    }
+                    .navigationDestination(for: PlainNavigationEntry.self) { entry in
+                        RouteView(route: entry.route)
+                            .safeAreaPadding(.leading, railInset)
+                            .inlineNavigationTitle()
+                            .hidesBarBackground()
+                            .environment(\.zoomNamespace, zoomNamespace)
                     }
             }
+            .environment(\.zoomNamespace, zoomNamespace)
+            #endif
         }
         // 整个窗口共用一层背景，作为窗口自身的背景绘制，
         // 这样总能延伸到标题栏和每个页面之下。
@@ -143,7 +167,7 @@ private struct SidebarView: View {
     var body: some View {
         let selection = Binding<SidebarItem?>(
             get: { navigator.selection },
-            set: { if let value = $0 { navigator.selection = value } })
+            set: { if let value = $0 { navigator.select(value) } })
         List(selection: selection) {
             Section("浏览") {
                 row(.home)
@@ -254,7 +278,7 @@ private struct SidebarRail: View {
     private func button(_ item: SidebarItem) -> some View {
         let isSelected = navigator.selection == item
         return Button {
-            if isSelected { navigator.popToRoot() } else { navigator.selection = item }
+            if isSelected { navigator.popToRoot() } else { navigator.select(item) }
         } label: {
             Image(systemName: item.symbol)
                 .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
@@ -350,20 +374,23 @@ private struct SidebarRootView: View {
     let item: SidebarItem
 
     @Environment(AppModel.self) private var app
+    @Environment(\.isActiveRoute) private var isActiveRoute
 
     var body: some View {
         switch item {
         case .home:
             EntityListView(model: homeModel)
                 .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            app.compose(.feed()) { _ in app.showToast("已发布") }
-                        } label: {
-                            Label("发布动态", systemImage: "square.and.pencil")
+                    if isActiveRoute {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                app.compose(.feed()) { _ in app.showToast("已发布") }
+                            } label: {
+                                Label("发布动态", systemImage: "square.and.pencil")
+                            }
+                            .keyboardShortcut("n", modifiers: .command)
+                            .help("发布动态（⌘N）")
                         }
-                        .keyboardShortcut("n", modifiers: .command)
-                        .help("发布动态（⌘N）")
                     }
                 }
         case .hot:
@@ -397,10 +424,11 @@ private struct SidebarRootView: View {
 
     private var homeModel: PagedList {
         app.list("home") {
+            let app = app
             let client = app.client
             let installTime = app.installTime
             var isFirstRequest = true
-            return PagedList { request in
+            return PagedList(cacheKey: "home", cacheScope: { app.cacheScope }) { request in
                 let firstLaunch = isFirstRequest
                 isFirstRequest = false
                 return try await client.homeFeed(page: request.page, firstLaunch: firstLaunch, installTime: installTime,
@@ -411,8 +439,9 @@ private struct SidebarRootView: View {
 
     private func page(_ key: String, url: String, title: String) -> PagedList {
         app.list(key) {
+            let app = app
             let client = app.client
-            return PagedList { request in
+            return PagedList(cacheKey: key, cacheScope: { app.cacheScope }) { request in
                 try await client.dataList(url: url, title: title, page: request.page,
                                           firstItem: request.firstItem, lastItem: request.lastItem)
             }
@@ -460,6 +489,7 @@ private struct RemoteListView: View {
 
     @Environment(AppModel.self) private var app
     @State private var model: PagedList?
+    @State private var loadedSource: Source?
 
     var body: some View {
         Group {
@@ -469,8 +499,11 @@ private struct RemoteListView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(title.isEmpty ? "酷安" : title)
+        .routeTitle(title.isEmpty ? "酷安" : title)
         .task(id: source) {
+            // 从列表点进帖子再返回时，保留原列表数据与滚动位置。
+            guard loadedSource != source || model == nil else { return }
+            loadedSource = source
             let client = app.client
             let title = title
             switch source {

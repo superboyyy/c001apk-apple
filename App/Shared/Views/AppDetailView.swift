@@ -10,6 +10,7 @@ struct AppDetailView: View {
     @State private var detail: Entity?
     @State private var failure: APIError?
     @State private var comments: PagedList?
+    @State private var loadedKey: String?
 
     var body: some View {
         Group {
@@ -31,8 +32,12 @@ struct AppDetailView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(detail?.title ?? "应用")
-        .task(id: key) { await load(interactive: false) }
+        .routeTitle(detail?.title ?? "应用")
+        .task(id: key) {
+            // 从下级页面返回时保留应用详情与评论滚动位置。
+            guard loadedKey != key || detail == nil || comments == nil else { return }
+            await load(interactive: false)
+        }
     }
 
     private func load(interactive: Bool) async {
@@ -44,6 +49,7 @@ struct AppDetailView: View {
                 : try await client.appDetail(id: key)
             let id = loaded.entityID
             detail = loaded
+            loadedKey = key
             comments = PagedList { request in
                 try await client.dataList(url: "/page?url=/feed/apkCommentList?id=\(id)", title: "", page: request.page,
                                           firstItem: request.firstItem, lastItem: request.lastItem)

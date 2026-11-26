@@ -18,11 +18,11 @@ struct AppCommands: Commands {
                 .keyboardShortcut("[", modifiers: [.command, .shift])
                 .disabled(navigator.currentPath.isEmpty)
             Divider()
-            Button("搜索") { navigator.selection = .search }
+            Button("搜索") { navigator.select(.search) }
                 .keyboardShortcut("f", modifiers: .command)
             Divider()
             ForEach(Array(Self.shortcuts.enumerated()), id: \.element) { index, item in
-                Button(item.title) { navigator.selection = item }
+                Button(item.title) { navigator.select(item) }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
         }

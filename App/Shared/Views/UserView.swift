@@ -10,6 +10,7 @@ struct UserView: View {
     @State private var user: Entity?
     @State private var failure: APIError?
     @State private var feeds: PagedList?
+    @State private var loadedKey: String?
 
     var body: some View {
         Group {
@@ -25,8 +26,12 @@ struct UserView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(user?.username ?? "用户")
-        .task(id: key) { await load(interactive: false) }
+        .routeTitle(user?.username ?? "用户")
+        .task(id: key) {
+            // 从下级帖子/页面返回时会重新触发 .task；已加载过当前用户则直接保留状态与滚动位置。
+            guard loadedKey != key || user == nil || feeds == nil else { return }
+            await load(interactive: false)
+        }
     }
 
     private func load(interactive: Bool) async {
@@ -41,6 +46,7 @@ struct UserView: View {
             }
             let uid = loaded.uid
             user = loaded
+            loadedKey = key
             feeds = PagedList { request in
                 try await client.userFeed(uid: uid, page: request.page, firstItem: request.firstItem, lastItem: request.lastItem)
             }

@@ -45,7 +45,7 @@ struct LocalFollowView: View {
                 }
             }
         }
-        .navigationTitle(title)
+        .routeTitle(title)
     }
 
     private var summary: some View {
@@ -97,9 +97,10 @@ struct LocalFollowUserList: View {
     }
 
     private func row(_ user: LocalFollowUser) -> some View {
-        HStack(spacing: 12) {
+        let zoomID = "local-follow-\(user.uid)"
+        return HStack(spacing: 12) {
             Button {
-                navigator.push(.user(user.uid))
+                navigator.push(.user(user.uid), zoomID: zoomID)
             } label: {
                 HStack(spacing: 12) {
                     AvatarView(url: user.avatar, size: 40)
@@ -125,6 +126,7 @@ struct LocalFollowUserList: View {
             .accessibilityLabel("取消\(title)：\(user.displayName)")
         }
         .card(padding: 12)
+        .zoomTransitionSource(id: zoomID)
     }
 }
 
