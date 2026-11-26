@@ -27,7 +27,7 @@ xcodegen generate
 open c001apk.xcodeproj
 ```
 
-选择 `c001apk-macOS` 或 `c001apk-iPadOS` 运行。在真机 iPad 上运行需要在工程里填入自己的开发团队。
+选择 `c001apk-macOS` 或 `c001apk-iPadOS` 运行。在真机 iPad 上运行可在仓库根目录新建 `Local.xcconfig`（已被 `.gitignore` 忽略，参考 `Signing.xcconfig`）填入自己的开发团队与自动签名配置，重新运行 `xcodegen generate` 也不会被覆盖。
 
 协议层可以单独测试：
 

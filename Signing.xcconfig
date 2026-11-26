@@ -1,0 +1,10 @@
+// 默认签名与包名前缀配置（受 Git 跟踪）。
+// 个人开发团队、自动签名等本机配置请写在同目录的 Local.xcconfig（已被 .gitignore 忽略），
+// 重新执行 xcodegen generate 不会覆盖 Local.xcconfig。
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+APP_BUNDLE_ID_PREFIX = com.superboyyy.c001apk
+
+#include? "Local.xcconfig"
