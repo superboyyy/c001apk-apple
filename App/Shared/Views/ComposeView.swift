@@ -172,15 +172,20 @@ struct ComposeView: View {
     }
 
     private func thumbnail(_ image: PickedImage) -> some View {
-        Group {
-            if let preview = image.thumbnail {
-                Image(decorative: preview, scale: 1).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                Rectangle().fill(.quaternary).overlay { Image(systemName: "photo").foregroundStyle(.tertiary) }
+        Color.clear
+            .overlay {
+                Group {
+                    if let preview = image.thumbnail {
+                        Image(decorative: preview, scale: 1).resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Rectangle().fill(.quaternary).overlay { Image(systemName: "photo").foregroundStyle(.tertiary) }
+                    }
+                }
+                .allowsHitTesting(false)
             }
-        }
-        .frame(width: 76, height: 76)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .frame(width: 76, height: 76)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(alignment: .topTrailing) {
             Button {
                 images.removeAll { $0.id == image.id }

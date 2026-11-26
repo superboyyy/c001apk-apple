@@ -13,9 +13,9 @@ enum ImageURL {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         if text.hasPrefix("//") { text = "https:" + text }
-        if text.hasPrefix("http://") { text = "https://" + text.dropFirst("http://".count) }
+        if text.lowercased().hasPrefix("http://") { text = "https://" + text.dropFirst("http://".count) }
         guard let url = URL(string: text) ?? URL(string: text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""),
-              url.scheme == "https", url.host != nil
+              url.scheme?.lowercased() == "https", url.host != nil
         else { return nil }
         return url
     }
@@ -187,23 +187,32 @@ struct RemoteImage: View {
     }
 
     var body: some View {
-        ZStack {
-            if let image = image ?? url.flatMap({ ImagePipeline.shared.cached($0, maxPixel: maxPixel) }) {
-                Image(platformImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: contentMode)
-            } else {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: failed ? "exclamationmark.triangle" : placeholderSymbol)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.tertiary)
+        // 用 `Color.clear` 锚定容器尺寸并关闭内部 `.fill` 图片的命中测试：
+        // SwiftUI 的 `.clipShape` / `.clipped` 只裁切绘制不裁切命中区域，
+        // 若不隔离，长图在卡片里的图片按钮会向上下溢出透明热区，吞掉标题、正文、头像甚至整张卡片的点击。
+        Color.clear
+            .overlay {
+                Group {
+                    if let image = image ?? url.flatMap({ ImagePipeline.shared.cached($0, maxPixel: maxPixel) }) {
+                        Image(platformImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: contentMode)
+                    } else {
+                        Rectangle()
+                            .fill(.quaternary)
+                            .overlay {
+                                Image(systemName: failed ? "exclamationmark.triangle" : placeholderSymbol)
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.tertiary)
+                            }
                     }
+                }
+                .allowsHitTesting(false)
             }
-        }
-        .task(id: url) {
+            .clipped()
+            .contentShape(Rectangle())
+            .task(id: url) {
             guard let url else { failed = true; return }
             if let cached = ImagePipeline.shared.cached(url, maxPixel: maxPixel) {
                 image = cached
