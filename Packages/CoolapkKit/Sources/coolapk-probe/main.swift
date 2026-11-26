@@ -36,6 +36,28 @@ let query: [(String, String?)] = arguments.dropFirst().map { item in
 var identity = ClientIdentity(deviceCode: ProcessInfo.processInfo.environment["COOLAPK_DEVICE"] ?? "")
 let client = CoolapkClient(identity: identity)
 
+// 调试会话：coolapk-probe <路径> [key=value …] --session [--alternate]
+// 同一请求连发几次（--alternate 时在两个接口域名间轮换），看服务端何时换发会话 Cookie。
+// 只打印指纹，不打印 Cookie 的值。
+if CommandLine.arguments.contains("--session") {
+    client.onSessionCookieChange = { cookie in
+        let mark = cookie.map { $0.value.isEmpty ? "占位" : String(format: "%04x", abs($0.value.hashValue) % 65_536) }
+        print("  会话 Cookie →", mark ?? "清除")
+    }
+    let alternate = CommandLine.arguments.contains("--alternate")
+    for round in 1...4 {
+        let api2 = alternate ? round % 2 == 0 : useAPI2
+        do {
+            _ = try await client.get(path, query: query, host: api2 ? CoolapkClient.api2Host : CoolapkClient.apiHost)
+            print("第 \(round) 次（\(api2 ? "api2" : "api")）：成功")
+        } catch {
+            let failure = APIError.from(error)
+            print("第 \(round) 次（\(api2 ? "api2" : "api")）：\(failure.kind) \(failure.serverStatus ?? "")")
+        }
+    }
+    exit(0)
+}
+
 func describe(_ json: JSON, indent: String = "", depth: Int = 0) {
     guard depth < 3 else { return }
     switch json {

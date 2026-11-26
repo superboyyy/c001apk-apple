@@ -236,8 +236,14 @@ public final class CoolapkClient: @unchecked Sendable {
                 }
                 let retried = try await perform(method: method, path: path, query: retryQuery,
                                                 form: retryForm, encoding: encoding, host: host, state: snapshot())
-                if challenge.field.isEmpty, CaptchaChallenge.from(body: retried.1) != nil {
-                    clearValidation()
+                if challenge.field.isEmpty, snapshot().generation == state.generation {
+                    if CaptchaChallenge.from(body: retried.1) != nil {
+                        clearValidation()
+                    } else {
+                        // 服务端常在接受凭证的这次响应里换发会话 Cookie：把凭证绑到新会话上，
+                        // 否则它随旧会话一起作废，下一个请求又要重新验证。
+                        setValidation(proof)
+                    }
                 }
                 return Response(body: try APIError.validate(
                     status: retried.0, body: retried.1, path: retried.2,
