@@ -14,6 +14,9 @@ enum AccountStore {
     private static let itemName = "accounts"
     /// 旧版本只保存一个账号时使用的条目名。
     private static let legacyItemName = "current"
+    /// 游客 / 人机验证后的服务端会话 Cookie 条目名。
+    private static let sessionItemName = "apiSession"
+    private static let sessionLock = NSLock()
 
     private static func query(_ name: String) -> [String: Any] {
         [
@@ -53,6 +56,51 @@ enum AccountStore {
         var request = query(itemName)
         request[kSecValueData as String] = data
         request[kSecAttrLabel as String] = "酷果账号"
+        return SecItemAdd(request as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// 读取服务端会话 Cookie；若仅存在于旧版 `UserDefaults`，会自动迁移至系统钥匙串并清除明文旧键。
+    static func loadSession(legacyDefaultsKey: String) -> CoolapkClient.SessionCookie? {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        let defaults = UserDefaults.standard
+        if let data = read(sessionItemName),
+           let cookie = try? JSONDecoder().decode(CoolapkClient.SessionCookie.self, from: data) {
+            if defaults.object(forKey: legacyDefaultsKey) != nil {
+                defaults.removeObject(forKey: legacyDefaultsKey)
+            }
+            return cookie
+        }
+        if let legacyData = defaults.data(forKey: legacyDefaultsKey),
+           let cookie = try? JSONDecoder().decode(CoolapkClient.SessionCookie.self, from: legacyData) {
+            if writeSessionLocked(cookie) {
+                defaults.removeObject(forKey: legacyDefaultsKey)
+            }
+            return cookie
+        }
+        return nil
+    }
+
+    /// 将服务端会话 Cookie 写入系统钥匙串，传入 `nil` 时清除钥匙串及旧版 `UserDefaults` 残留。
+    @discardableResult
+    static func saveSession(_ cookie: CoolapkClient.SessionCookie?, legacyDefaultsKey: String) -> Bool {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: legacyDefaultsKey) != nil {
+            defaults.removeObject(forKey: legacyDefaultsKey)
+        }
+        return writeSessionLocked(cookie)
+    }
+
+    private static func writeSessionLocked(_ cookie: CoolapkClient.SessionCookie?) -> Bool {
+        SecItemDelete(query(sessionItemName) as CFDictionary)
+        guard let cookie else { return true }
+        guard let data = try? JSONEncoder().encode(cookie) else { return false }
+        var request = query(sessionItemName)
+        request[kSecValueData as String] = data
+        request[kSecAttrLabel as String] = "酷果会话"
+        request[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return SecItemAdd(request as CFDictionary, nil) == errSecSuccess
     }
 }

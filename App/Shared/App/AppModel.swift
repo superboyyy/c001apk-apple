@@ -78,8 +78,7 @@ final class AppModel {
         let account = stored.accounts.first { $0.uid == stored.currentUID } ?? stored.accounts.first
         self.accounts = stored.accounts
         self.account = account
-        let session = defaults.data(forKey: Self.sessionKey)
-            .flatMap { try? JSONDecoder().decode(CoolapkClient.SessionCookie.self, from: $0) }
+        let session = AccountStore.loadSession(legacyDefaultsKey: Self.sessionKey)
         let apiClient = CoolapkClient(identity: identity, account: account, sessionCookie: session)
         client = apiClient
         let service = SzlmIdentityService(
@@ -104,11 +103,7 @@ final class AppModel {
             try? await client.livePhotoVideoURL(for: media)
         }
         client.onSessionCookieChange = { cookie in
-            if let cookie, let data = try? JSONEncoder().encode(cookie) {
-                UserDefaults.standard.set(data, forKey: Self.sessionKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: Self.sessionKey)
-            }
+            AccountStore.saveSession(cookie, legacyDefaultsKey: Self.sessionKey)
         }
         client.captchaHandler = { [weak self] challenge in
             await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
