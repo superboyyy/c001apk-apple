@@ -124,8 +124,9 @@ struct ReplyCard: View {
     }
 
     private var nestedReplies: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(entity.replyRows.prefix(3)) { row in
+        let preview = Array(entity.replyRows.prefix(3))
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(preview.enumerated()), id: \.offset) { _, row in
                 nestedReplyRow(row)
             }
             let total = max(entity.replyCount, entity.replyRows.count + entity.replyRowsMore)

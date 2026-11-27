@@ -46,8 +46,11 @@ final class LibraryStore {
     private(set) var favorites: [SavedFeed] = []
     private(set) var history: [SavedFeed] = []
     private(set) var searches: [String] = []
-    private(set) var blocked: [BlockedUser] = []
+    private(set) var blocked: [BlockedUser] = [] {
+        didSet { blockedUIDs = Set(blocked.map(\.uid)) }
+    }
 
+    @ObservationIgnored private var blockedUIDs: Set<String> = []
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
@@ -63,6 +66,7 @@ final class LibraryStore {
             history = snapshot.history
             searches = snapshot.searches
             blocked = snapshot.blocked
+            blockedUIDs = Set(snapshot.blocked.map(\.uid))
         }
     }
 
@@ -141,7 +145,11 @@ final class LibraryStore {
 
     // MARK: 屏蔽列表
 
-    func isBlocked(uid: String) -> Bool { !uid.isEmpty && blocked.contains { $0.uid == uid } }
+    func isBlocked(uid: String) -> Bool {
+        // 读取 `blocked.isEmpty` 以保留对屏蔽列表变更的观察依赖，同时用集合做到 O(1) 查找。
+        guard !blocked.isEmpty, !uid.isEmpty else { return false }
+        return blockedUIDs.contains(uid)
+    }
 
     func block(uid: String, username: String) {
         guard !uid.isEmpty, !isBlocked(uid: uid) else { return }

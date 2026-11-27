@@ -101,9 +101,8 @@ extension View {
     func keyActionButtonStyle() -> some View { buttonStyle(KeyActionButtonStyle()) }
 }
 
-/// 整个窗口背后的柔和色彩。Liquid Glass 需要有东西可折射，
-/// 在纯色窗口背景上卡片看起来只是普通面板。
-struct AppBackdrop: View {
+/// 整个窗口背后的柔和色彩画布（不含 `ignoresSafeArea`），供窗口背景与过渡页对齐复用。
+struct AppBackdropCanvas: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -125,8 +124,16 @@ struct AppBackdrop: View {
                     Color.blue.opacity(soft), Color.brand.opacity(soft), Color.mint.opacity(strong),
                 ])
         }
-        .ignoresSafeArea()
         .accessibilityHidden(true)
+    }
+}
+
+/// 整个窗口背后的柔和色彩。Liquid Glass 需要有东西可折射，
+/// 在纯色窗口背景上卡片看起来只是普通面板。
+struct AppBackdrop: View {
+    var body: some View {
+        AppBackdropCanvas()
+            .ignoresSafeArea()
     }
 }
 

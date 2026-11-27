@@ -8,7 +8,6 @@ struct SavedFeedList: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
-    @Environment(\.isActiveRoute) private var isActiveRoute
     @State private var confirmsClear = false
 
     private var items: [SavedFeed] { kind == .favorites ? app.library.favorites : app.library.history }
@@ -34,18 +33,9 @@ struct SavedFeedList: View {
                 .scrollEdgeEffectStyle(.soft, for: .top)
             }
         }
-        .toolbar {
-            if isActiveRoute, kind == .history, !items.isEmpty {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        confirmsClear = true
-                    } label: {
-                        Label("清空历史", systemImage: "trash")
-                    }
-                    .help("清空浏览历史")
-                }
-            }
-        }
+        .modifier(SavedFeedHistoryToolbar(enabled: kind == .history && !items.isEmpty) {
+            confirmsClear = true
+        })
         .confirmationDialog("清空全部浏览历史？", isPresented: $confirmsClear) {
             Button("清空", role: .destructive) { app.library.clearHistory() }
             Button("取消", role: .cancel) {}
@@ -90,6 +80,26 @@ struct SavedFeedList: View {
             Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(item.id)") }
             Button(kind == .favorites ? "取消收藏" : "从历史中移除", role: .destructive) {
                 if kind == .favorites { app.library.removeFavorite(item.id) } else { app.library.removeHistory(item.id) }
+            }
+        }
+    }
+}
+
+private struct SavedFeedHistoryToolbar: ViewModifier {
+    let enabled: Bool
+    let onClear: () -> Void
+
+    @Environment(\.isActiveRoute) private var isActiveRoute
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if isActiveRoute, enabled {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: onClear) {
+                        Label("清空历史", systemImage: "trash")
+                    }
+                    .help("清空浏览历史")
+                }
             }
         }
     }

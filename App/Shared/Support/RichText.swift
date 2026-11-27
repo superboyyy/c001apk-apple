@@ -57,7 +57,25 @@ enum RichText {
         return stripped.isEmpty ? "查看图片" : stripped
     }
 
+    private final class ParsedNodesBox: NSObject {
+        let nodes: [Node]
+        init(_ nodes: [Node]) { self.nodes = nodes }
+    }
+
+    /// 缓存常用短 HTML 的解析结果，避免列表滚动复用与父视图重算时重复在主线程跑多条正则。
+    private static let parseCache: NSCache<NSString, ParsedNodesBox> = {
+        let cache = NSCache<NSString, ParsedNodesBox>()
+        cache.countLimit = 800
+        return cache
+    }()
+
     static func parse(_ html: String, emoji: Bool = true, markdown: Bool = false, photoLinkHref: String? = nil) -> [Node] {
+        let cacheKey: NSString? = html.utf8.count <= 4096
+            ? "\(emoji ? "1" : "0")|\(markdown ? "1" : "0")|\(photoLinkHref ?? "")|\(html)" as NSString
+            : nil
+        if let cacheKey, let cached = parseCache.object(forKey: cacheKey) {
+            return cached.nodes
+        }
         var nodes: [Node] = []
         var bold = false
         var linkHref: String?
@@ -133,6 +151,9 @@ enum RichText {
         if let href = linkHref, !href.isEmpty {
             let label = cleanedLinkText(linkText, href: href)
             if !label.isEmpty { nodes.append(.link(label, href: href)) }
+        }
+        if let cacheKey {
+            parseCache.setObject(ParsedNodesBox(nodes), forKey: cacheKey)
         }
         return nodes
     }
@@ -271,6 +292,49 @@ enum RichText {
     }
 
     @MainActor private static var emojiCache: [String: PlatformImage] = [:]
+    @MainActor private static var renderedTextCache: [RenderedTextKey: Text] = [:]
+
+    private struct RenderedTextKey: Hashable {
+        let html: String
+        let fontSize: Int
+        let weight: Font.Weight
+        let emoji: Bool
+        let markdown: Bool
+        let photoLinkHref: String
+    }
+
+    /// 缓存构建完成的 `Text`（含属性字符串与表情插图），避免滚动复用或卡片刷新时重复组装 `AttributedString` 与 `URLComponents`。
+    @MainActor
+    static func renderedText(
+        html: String,
+        fontSize: CGFloat,
+        weight: Font.Weight = .regular,
+        emoji: Bool,
+        markdown: Bool,
+        photoLinkHref: String?
+    ) -> Text {
+        let canCache = html.utf8.count <= 4096
+        let key = canCache ? RenderedTextKey(
+            html: html,
+            fontSize: Int((fontSize * 10).rounded()),
+            weight: weight,
+            emoji: emoji,
+            markdown: markdown,
+            photoLinkHref: photoLinkHref ?? ""
+        ) : nil
+        if let key, let cached = renderedTextCache[key] {
+            return cached
+        }
+        let nodes = parse(html, emoji: emoji, markdown: markdown, photoLinkHref: photoLinkHref)
+        let built = text(nodes, fontSize: fontSize, weight: weight)
+        if let key {
+            if renderedTextCache.count >= 600 {
+                renderedTextCache.removeAll(keepingCapacity: true)
+            }
+            renderedTextCache[key] = built
+        }
+        return built
+    }
 
     /// 取指定边长的表情图片（带缓存）。
     @MainActor
@@ -363,10 +427,13 @@ struct RichTextView: View {
 
     var body: some View {
         let size = fontSize ?? app.settings.fontSize
-        let text = RichText.text(
-            RichText.parse(html, emoji: app.settings.showEmoji, markdown: markdown, photoLinkHref: fallbackPictures.first),
+        let text = RichText.renderedText(
+            html: html,
             fontSize: size,
-            weight: weight
+            weight: weight,
+            emoji: app.settings.showEmoji,
+            markdown: markdown,
+            photoLinkHref: fallbackPictures.first
         )
         .lineSpacing(size * 0.32)
         .lineLimit(lineLimit)

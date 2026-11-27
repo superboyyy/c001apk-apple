@@ -1,5 +1,9 @@
 import CoolapkKit
+import Observation
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 enum EntityListLayout: Equatable {
     /// 动态按窗口宽度排成一到四列。
@@ -18,19 +22,16 @@ struct EntityListView<Header: View>: View {
     @ViewBuilder var header: () -> Header
 
     @Environment(AppModel.self) private var app
-    @Environment(\.isActiveRoute) private var isActiveRoute
-    @State private var showsTopButton = false
+    @Environment(Navigator.self) private var navigator: Navigator?
     /// 排版实际采用的内容宽度。瀑布流下只在容器宽度稳定后才更新，见 `widthChanged`。
     @State private var layoutWidth: CGFloat?
     @State private var pendingWidth: Task<Void, Never>?
-    @State private var reflowEnd: Task<Void, Never>?
-    @State private var position = ScrollPosition(edge: .top)
     /// 滚动状态；放在引用类型里，更新它不会触发界面重算。
     @State private var scroll = ScrollOffsetBox()
+    /// 浮窗按钮与触底状态隔离在独立可观察对象里，滚动越过阈值或加载分页时不会触发整棵列表重算。
+    @State private var chrome = ScrollChromeState()
     /// 瀑布流分列的缓存，同样不参与界面重算。
     @State private var lanes = MasonryLanes()
-    /// 距离底部不远了，该加载下一页。
-    @State private var isNearBottom = false
 
     private static var gutter: CGFloat { 12 }
     private static var horizontalPadding: CGFloat { 16 }
@@ -38,6 +39,13 @@ struct EntityListView<Header: View>: View {
     private static var minimumColumnWidth: CGFloat { 280 }
     /// 距底部多远时开始加载下一页。
     private static var preloadDistance: CGFloat { 600 }
+    private static var topAnchorID: String { "entity-list-top-anchor" }
+
+    private var effectiveWidth: CGFloat {
+        if let layoutWidth { return layoutWidth }
+        if let detail = navigator?.detailFrame.width, detail > 200 { return detail.rounded() }
+        return 900
+    }
 
     private var columns: Int {
         switch layout {
@@ -45,7 +53,7 @@ struct EntityListView<Header: View>: View {
         case .masonry:
             let mode = app.settings.columnMode
             if mode != .automatic { return mode.rawValue }
-            let contentWidth = max((layoutWidth ?? 900) - Self.horizontalPadding * 2, 200)
+            let contentWidth = max(effectiveWidth - Self.horizontalPadding * 2, 200)
             let fit = Int((contentWidth + Self.gutter) / (Self.minimumColumnWidth + Self.gutter))
             return min(max(fit, 1), 6)
         }
@@ -53,7 +61,7 @@ struct EntityListView<Header: View>: View {
 
     /// 容器宽度变化。边栏展开 / 收起的动画和拖动窗口时宽度每帧都在变：
     /// 瀑布流若逐帧重排，既卡顿又会丢失滚动位置，所以先冻结排版，等宽度
-    /// 稳定后一次性重排，再由锚点卡片把阅读位置校正回来。
+    /// 稳定后一次性重排，并按列数比例维持阅读位置。
     private func widthChanged(_ width: CGFloat) {
         guard width >= 200 else { return }
         pendingWidth?.cancel()
@@ -70,55 +78,20 @@ struct EntityListView<Header: View>: View {
 
     private func applyWidth(_ width: CGFloat) {
         let previousColumns = columns
-        let offset = scroll.offset
-        beginReflow()
+        let offset = scroll.currentOffset()
+        let startedNearTop = offset <= 60
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { layoutWidth = width }
-        // 列数变了会重建各列，锚点卡片可能暂时不在屏幕上：先按比例折算到大致位置。
-        if columns != previousColumns, offset > 0, !scroll.reflowStartedNearTop {
-            scrollWithoutAnimation(to: offset * CGFloat(previousColumns) / CGFloat(columns))
-        }
-    }
-
-    /// 进入“重排中”状态，期间由锚点卡片校正滚动位置；片刻后自动结束。
-    private func beginReflow() {
-        // 停在顶部附近时不做任何校正：重排后仍应留在顶部。
-        if !scroll.isReflowing { scroll.reflowStartedNearTop = scroll.offset <= -scroll.topInset + 60 }
-        scroll.isReflowing = true
-        reflowEnd?.cancel()
-        reflowEnd = Task {
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            scroll.isReflowing = false
-            scroll.pickAnchor()
-        }
-    }
-
-    /// 无动画地滚到指定的内容偏移。
-    private func scrollWithoutAnimation(to offset: CGFloat) {
-        scroll.offset = offset
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        // scrollTo(y:) 以“内容顶端贴着安全区”为 0，要补上顶部留白。
-        withTransaction(transaction) { position.scrollTo(y: offset + scroll.topInset) }
-    }
-
-    /// 包一层位置上报：记录卡片位置，重排中由锚点卡片校正滚动位置。
-    private func tracked(_ entity: Entity) -> some View {
-        EntityCard(entity: entity)
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.frame(in: .named(Self.contentSpace)).minY.rounded()
-            } action: { minY in
-                scroll.frames[entity.id] = minY
-                if let target = scroll.correctedOffset(for: entity.id, minY: minY) {
-                    scrollWithoutAnimation(to: target)
-                }
+        // 列数变化后按比例折算大致阅读位置，避免拖动窗口时跳到完全陌生的位置。
+        if columns != previousColumns, offset > 0, !startedNearTop {
+            let ratio = CGFloat(previousColumns) / CGFloat(columns)
+            let targetOffset = offset * ratio
+            Task { @MainActor in
+                scroll.scrollWithoutAnimation(to: targetOffset)
             }
-            .onDisappear { scroll.frames[entity.id] = nil }
+        }
     }
-
-    private static var contentSpace: String { "entity-list-content" }
 
     private var contentMaxWidth: CGFloat {
         switch layout {
@@ -140,109 +113,84 @@ struct EntityListView<Header: View>: View {
     }
 
     var body: some View {
-        ScrollView {
-            // 外层不用懒加载：懒加载栈套懒加载栈时，两层互相依赖对方估算的高度，
-            // 滚到底部附近会陷入无休止的重排，把主线程卡死。
-            VStack(spacing: 12) {
-                header()
-                if !hidesContent { content }
-            }
-            .frame(maxWidth: contentMaxWidth)
-            .padding(.horizontal, Self.horizontalPadding)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity)
-            // 排版宽度固定为 layoutWidth；容器暂时更宽或更窄时内容靠左、不重排。
-            .frame(width: layoutWidth)
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            .coordinateSpace(.named(Self.contentSpace))
-        }
-        // 可用宽度 = 容器宽度减去两侧安全区留白。
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            (geometry.containerSize.width - geometry.contentInsets.leading - geometry.contentInsets.trailing).rounded()
-        } action: { _, width in
-            widthChanged(width)
-        }
-        .scrollPosition($position)
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .modifier(OptionalRefreshable(enabled: showsRefreshButton) {
-            let failure = await Task { @MainActor in
-                await model.refresh(interactive: true)
-            }.value
-            if let failure, !model.items.isEmpty {
-                app.report(failure)
-            }
-        })
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, value in
-            scroll.offset = value
-            if !scroll.isReflowing { scroll.pickAnchor() }
-        }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.contentInsets.top } action: { _, value in
-            scroll.topInset = value
-        }
-        .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, value in
-            scroll.viewportHeight = value
-        }
-        .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y > 900 } action: { _, value in
-            withAnimation(.smooth(duration: 0.2)) { showsTopButton = value }
-        }
-        // 离底部还有一段距离就开始加载下一页，连续滚动时不必等到见底。
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            guard geometry.contentSize.height > 1, geometry.containerSize.height > 1 else { return false }
-            return geometry.contentOffset.y + geometry.containerSize.height > geometry.contentSize.height - Self.preloadDistance
-        } action: { _, value in
-            isNearBottom = value
-        }
-        .task(id: MoreTrigger(
-            isNearBottom: isNearBottom,
-            isLoaded: model.phase == .loaded,
-            hidesContent: hidesContent,
-            count: model.items.count,
-            isLoading: model.isLoadingMore,
-            isRefreshing: model.isRefreshing,
-            hasError: model.moreError != nil,
-            autoLoadPaused: model.autoLoadPaused
-        )) {
-            if isNearBottom, !hidesContent { model.requestMore() }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if showsTopButton {
-                Button {
-                    withAnimation(.smooth) { position.scrollTo(edge: .top) }
-                } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 22, height: 26)
-                }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .help("回到顶部")
-                .padding(20)
-                .transition(.scale.combined(with: .opacity))
-            }
-        }
-        .task(id: LoadTrigger(isIdle: model.phase == .idle,
-                              needsSilentRefresh: model.needsSilentRefresh,
-                              resetCount: model.resetCount)) {
-            model.loadIfNeeded()
-        }
-        .toolbar {
-            if showsRefreshButton, isActiveRoute {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task {
-                            if let failure = await model.refresh(interactive: true), !model.items.isEmpty {
-                                app.report(failure)
-                            }
-                        }
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                // 外层不用懒加载：懒加载栈套懒加载栈时，两层互相依赖对方估算的高度，
+                // 滚到底部附近会陷入无休止的重排，把主线程卡死。
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: 0)
+                        .id(Self.topAnchorID)
+                    VStack(spacing: 12) {
+                        header()
+                        if !hidesContent { content }
                     }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .help("刷新（⌘R）")
-                    .disabled(model.phase == .loading || (model.isRefreshing && !model.isSilentRefreshing))
+                    .frame(maxWidth: contentMaxWidth)
+                    .padding(.horizontal, Self.horizontalPadding)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    // 排版宽度固定为 layoutWidth；容器暂时更宽或更窄时内容靠左、不重排。
+                    .frame(width: layoutWidth)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                }
+                #if os(macOS)
+                .background { MacScrollViewFinder(box: scroll) }
+                #endif
+            }
+            // 所有滚动期指标合并为单个离散状态监听：日常滚动绝大多数帧完全相等，零回调、零主线程事务。
+            .onScrollGeometryChange(for: ScrollObservedMetrics.self) { geometry in
+                let offsetY = geometry.contentOffset.y
+                let nearBottom: Bool
+                if geometry.contentSize.height > 1, geometry.containerSize.height > 1 {
+                    nearBottom = offsetY + geometry.containerSize.height > geometry.contentSize.height - Self.preloadDistance
+                } else {
+                    nearBottom = false
+                }
+                return ScrollObservedMetrics(
+                    availableWidth: (geometry.containerSize.width - geometry.contentInsets.leading - geometry.contentInsets.trailing).rounded(),
+                    topInset: geometry.contentInsets.top.rounded(),
+                    viewportHeight: geometry.containerSize.height.rounded(),
+                    showsTopButton: offsetY > 900,
+                    isNearBottom: nearBottom
+                )
+            } action: { old, metrics in
+                if old.topInset != metrics.topInset || old.viewportHeight != metrics.viewportHeight
+                    || old.availableWidth != metrics.availableWidth {
+                    scroll.topInset = metrics.topInset
+                    scroll.viewportHeight = metrics.viewportHeight
+                    widthChanged(metrics.availableWidth)
+                }
+                if chrome.showsTopButton != metrics.showsTopButton {
+                    withAnimation(.smooth(duration: 0.2)) {
+                        chrome.showsTopButton = metrics.showsTopButton
+                    }
+                }
+                if chrome.isNearBottom != metrics.isNearBottom {
+                    chrome.isNearBottom = metrics.isNearBottom
+                }
+            }
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .modifier(OptionalRefreshable(enabled: showsRefreshButton) {
+                let failure = await Task { @MainActor in
+                    await model.refresh(interactive: true)
+                }.value
+                if let failure, !model.items.isEmpty {
+                    app.report(failure)
+                }
+            })
+            .overlay(alignment: .bottomTrailing) {
+                ScrollTopButtonOverlay(chrome: chrome) {
+                    withAnimation(.smooth) {
+                        scrollProxy.scrollTo(Self.topAnchorID, anchor: .top)
+                    }
                 }
             }
         }
+        .background {
+            EntityListLoadDriver(model: model)
+            EntityListLoadMoreDriver(model: model, chrome: chrome, hidesContent: hidesContent)
+        }
+        .modifier(EntityListRefreshToolbar(model: model, enabled: showsRefreshButton))
     }
 
     @ViewBuilder
@@ -262,45 +210,144 @@ struct EntityListView<Header: View>: View {
             .frame(minHeight: 240)
         case .loaded:
             let items = visibleItems
+            let revision = model.contentRevision
             if columns <= 1 {
                 LazyVStack(spacing: 12) {
-                    ForEach(items) { tracked($0) }
+                    ForEach(items) { entity in
+                        EquatableEntityCard(entity: entity, revision: revision).equatable()
+                    }
                 }
             } else {
                 let leading = leadingCardCount(in: items)
                 if leading > 0 {
                     // 顶部推广卡片（横幅、图标入口、横滑标签）数量极少，直接常驻避免回收导致缩放过渡锚点丢失。
                     VStack(spacing: 12) {
-                        ForEach(items.prefix(leading)) { tracked($0) }
+                        ForEach(items.prefix(leading)) { entity in
+                            EquatableEntityCard(entity: entity, revision: revision).equatable()
+                        }
                     }
                 }
-                if leading < items.count { flow(Array(items.dropFirst(leading))) }
+                if leading < items.count { flow(Array(items.dropFirst(leading)), revision: revision) }
             }
-            footer
+            EntityListFooter(model: model)
         }
     }
 
     /// 瀑布流：每列一个懒加载栈，卡片的归属见 `MasonryLanes`。
-    private func flow(_ entities: [Entity]) -> some View {
+    private func flow(_ entities: [Entity], revision: Int) -> some View {
         // 估高用固定的名义宽度，卡片归属只随列数变化，不随实时宽度抖动。
         let width = MasonryMetrics.nominalColumnWidth
         let style = MasonryLanes.Style(columns: columns, columnWidth: width, spacing: Self.gutter,
                                        fontSize: app.settings.fontSize,
                                        showsReplyPreview: app.settings.showReplyPreview)
-        let columns = lanes.distribute(entities, style: style)
+        let columns = lanes.distribute(entities, style: style, revision: revision)
         return HStack(alignment: .top, spacing: Self.gutter) {
             ForEach(columns.indices, id: \.self) { lane in
                 LazyVStack(spacing: Self.gutter) {
-                    ForEach(columns[lane]) { tracked($0) }
+                    ForEach(columns[lane]) { entity in
+                        EquatableEntityCard(entity: entity, revision: revision).equatable()
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
             }
         }
         .environment(\.masonryColumnWidth, width)
     }
+}
 
-    @ViewBuilder
-    private var footer: some View {
+extension EntityListView where Header == EmptyView {
+    init(model: PagedList, layout: EntityListLayout = .masonry, showsRefreshButton: Bool = true) {
+        self.init(model: model, layout: layout, showsRefreshButton: showsRefreshButton, hidesContent: false) { EmptyView() }
+    }
+}
+
+/// 卡片判等包装：翻页追加时已有卡片 `id` 与 `revision` 不变，O(1) 跳过整张卡片重算。
+private struct EquatableEntityCard: View, Equatable {
+    let entity: Entity
+    let revision: Int
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.entity.id == rhs.entity.id && lhs.revision == rhs.revision
+    }
+
+    var body: some View {
+        EntityCard(entity: entity)
+    }
+}
+
+/// 独立持有的滚动浮窗与触底状态，避免状态切换牵连整棵信息流列表重算。
+@MainActor
+@Observable
+private final class ScrollChromeState {
+    var showsTopButton = false
+    var isNearBottom = false
+}
+
+/// 回到顶部悬浮按钮：只订阅 `chrome.showsTopButton`，不影响列表主体。
+private struct ScrollTopButtonOverlay: View {
+    let chrome: ScrollChromeState
+    let action: () -> Void
+
+    var body: some View {
+        if chrome.showsTopButton {
+            Button(action: action) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 22, height: 26)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .help("回到顶部")
+            .padding(20)
+            .transition(.scale.combined(with: .opacity))
+        }
+    }
+}
+
+/// 独立处理首屏加载与缓存静默刷新触发，避免 `needsSilentRefresh` 变化触发整页重算。
+private struct EntityListLoadDriver: View {
+    let model: PagedList
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .task(id: LoadTrigger(isIdle: model.phase == .idle,
+                                  needsSilentRefresh: model.needsSilentRefresh,
+                                  resetCount: model.resetCount)) {
+                model.loadIfNeeded()
+            }
+    }
+}
+
+/// 独立处理触底分页加载，避免 `isNearBottom / isLoadingMore / isRefreshing` 翻转引发整页瀑布流重算。
+private struct EntityListLoadMoreDriver: View {
+    let model: PagedList
+    let chrome: ScrollChromeState
+    let hidesContent: Bool
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .task(id: MoreTrigger(
+                isNearBottom: chrome.isNearBottom,
+                isLoaded: model.phase == .loaded,
+                hidesContent: hidesContent,
+                count: model.items.count,
+                isLoading: model.isLoadingMore,
+                isRefreshing: model.isRefreshing,
+                hasError: model.moreError != nil,
+                autoLoadPaused: model.autoLoadPaused
+            )) {
+                if chrome.isNearBottom, !hidesContent { model.requestMore() }
+            }
+    }
+}
+
+/// 独立分页页脚：只重算底部 56pt 状态区域，不触发上方卡片重算。
+private struct EntityListFooter: View {
+    let model: PagedList
+
+    var body: some View {
         Group {
             if let error = model.moreError {
                 VStack(spacing: 8) {
@@ -334,49 +381,108 @@ struct EntityListView<Header: View>: View {
     }
 }
 
-extension EntityListView where Header == EmptyView {
-    init(model: PagedList, layout: EntityListLayout = .masonry, showsRefreshButton: Bool = true) {
-        self.init(model: model, layout: layout, showsRefreshButton: showsRefreshButton, hidesContent: false) { EmptyView() }
+/// 独立刷新工具栏：隔离 `isActiveRoute` 环境读取，导航推入/返回时不会让列表主体失效重算。
+private struct EntityListRefreshToolbar: ViewModifier {
+    let model: PagedList
+    let enabled: Bool
+
+    @Environment(AppModel.self) private var app
+    @Environment(\.isActiveRoute) private var isActiveRoute
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if enabled, isActiveRoute {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task {
+                            if let failure = await model.refresh(interactive: true), !model.items.isEmpty {
+                                app.report(failure)
+                            }
+                        }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("刷新（⌘R）")
+                    .disabled(model.phase == .loading || (model.isRefreshing && !model.isSilentRefreshing))
+                }
+            }
+        }
     }
 }
 
 /// 滚动状态的引用类型容器：更新它不会触发界面重算。
-/// 同时记录可见卡片的位置，用来在重排时把阅读位置钉住。
+/// 仅在窗口宽度变动引起瀑布流列数重排时按需读取滚动偏移，日常滚动零开销。
+@MainActor
 final class ScrollOffsetBox {
-    var offset: CGFloat = 0
     /// 滚动视图顶部的安全区留白（导航栏 / 工具栏高度）。
     var topInset: CGFloat = 0
     var viewportHeight: CGFloat = 0
-    /// 已渲染卡片在内容坐标系里的顶部位置。
-    var frames: [UUID: CGFloat] = [:]
-    /// 锚点：重排前最靠近可视区顶部的卡片，及它相对顶部的距离。
-    private(set) var anchorID: UUID?
-    private(set) var anchorDelta: CGFloat = 0
-    var isReflowing = false
-    /// 本次重排开始时是否停在列表顶部附近。
-    var reflowStartedNearTop = false
+    #if os(macOS)
+    weak var scrollView: NSScrollView?
+    #endif
 
-    /// 选出当前最靠近可视区顶部的卡片作为锚点。
-    func pickAnchor() {
-        guard offset > -topInset + 1 else { anchorID = nil; return }
-        // 选顶部最接近可视区三分之一处的卡片：重排时内容上下漂移，它也不容易滚出屏幕。
-        let focus = offset + viewportHeight * 0.33
-        var best: (id: UUID, distance: CGFloat, delta: CGFloat)?
-        for (id, minY) in frames {
-            let distance = abs(minY - focus)
-            if best == nil || distance < best!.distance { best = (id, distance, minY - offset) }
-        }
-        anchorID = best?.id
-        anchorDelta = best?.delta ?? 0
+    func currentOffset() -> CGFloat {
+        #if os(macOS)
+        guard let scrollView else { return 0 }
+        return max(scrollView.contentView.bounds.origin.y + topInset, 0)
+        #else
+        return 0
+        #endif
     }
 
-    /// 重排中锚点卡片移动后，应滚动到的位置。
-    func correctedOffset(for id: UUID, minY: CGFloat) -> CGFloat? {
-        guard isReflowing, !reflowStartedNearTop, id == anchorID else { return nil }
-        let target = minY - anchorDelta
-        return abs(target - offset) > 0.5 ? target : nil
+    func scrollWithoutAnimation(to offset: CGFloat) {
+        #if os(macOS)
+        guard let scrollView, let document = scrollView.documentView else { return }
+        let maxY = max(document.bounds.height - scrollView.contentView.bounds.height, 0)
+        let targetY = min(max(offset - topInset, -topInset), maxY)
+        scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        #endif
     }
 }
+
+#if os(macOS)
+/// 挂载后一次性查找所在 `NSScrollView` 并弱引用保存，完全不拦截事件，日常滚动零开销。
+private struct MacScrollViewFinder: NSViewRepresentable {
+    let box: ScrollOffsetBox
+
+    func makeNSView(context: Context) -> FinderView {
+        let view = FinderView()
+        view.box = box
+        return view
+    }
+
+    func updateNSView(_ nsView: FinderView, context: Context) {
+        nsView.box = box
+        nsView.attachIfNeeded()
+    }
+
+    final class FinderView: NSView {
+        weak var box: ScrollOffsetBox?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override var acceptsFirstResponder: Bool { false }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            attachIfNeeded()
+        }
+
+        func attachIfNeeded() {
+            guard box?.scrollView == nil else { return }
+            var cursor: NSView? = superview
+            while let view = cursor {
+                if let scrollView = view as? NSScrollView {
+                    box?.scrollView = scrollView
+                    return
+                }
+                cursor = view.superview
+            }
+        }
+    }
+}
+#endif
 
 /// iPadOS 支持顶部下拉刷新，macOS 保持原生滚动条行为。
 private struct OptionalRefreshable: ViewModifier {
@@ -397,6 +503,15 @@ private struct OptionalRefreshable: ViewModifier {
         }
         #endif
     }
+}
+
+/// 合并滚动容器的离散状态参数：日常滚动时各字段恒定，完全不触发 action 回调。
+private struct ScrollObservedMetrics: Equatable {
+    var availableWidth: CGFloat
+    var topInset: CGFloat
+    var viewportHeight: CGFloat
+    var showsTopButton: Bool
+    var isNearBottom: Bool
 }
 
 /// 触发加载下一页的条件；任何一项变化都重新判断一次。
@@ -434,10 +549,15 @@ final class MasonryLanes {
     /// 各列里卡片在列表中的下标。
     private var lanes: [[Int]] = []
     private var heights: [CGFloat] = []
+    private var cachedRevision: Int = -1
+    private var cachedResult: [[Entity]] = []
 
-    func distribute(_ entities: [Entity], style: Style) -> [[Entity]] {
+    func distribute(_ entities: [Entity], style: Style, revision: Int) -> [[Entity]] {
         let isAppend = style == self.style && entities.count >= ids.count
             && zip(entities, ids).allSatisfy { $0.id == $1 }
+        if isAppend, entities.count == ids.count, revision == cachedRevision, !cachedResult.isEmpty {
+            return cachedResult
+        }
         if !isAppend {
             self.style = style
             ids = []
@@ -454,7 +574,10 @@ final class MasonryLanes {
                 showsReplyPreview: style.showsReplyPreview) + style.spacing
             ids.append(entity.id)
         }
-        return lanes.map { $0.map { entities[$0] } }
+        let result = lanes.map { $0.map { entities[$0] } }
+        cachedRevision = revision
+        cachedResult = result
+        return result
     }
 }
 

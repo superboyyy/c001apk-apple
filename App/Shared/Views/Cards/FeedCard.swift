@@ -16,6 +16,7 @@ struct FeedCard: View {
     }
 
     var body: some View {
+        let pictures = entity.pictures
         VStack(alignment: .leading, spacing: 10) {
             FeedAuthorHeader(entity: entity)
 
@@ -29,11 +30,11 @@ struct FeedCard: View {
             }
             if !entity.message.isEmpty {
                 RichTextView(html: entity.message, lineLimit: textLineLimit, markdown: isArticle,
-                             mediaSource: entity, fallbackPictures: entity.pictures, onCardTap: open)
+                             mediaSource: entity, fallbackPictures: pictures, onCardTap: open)
                     .foregroundStyle(isArticle ? .secondary : .primary)
             }
-            if !isArticle, !entity.pictures.isEmpty {
-                FeedImageGrid(pictures: entity.pictures, source: entity)
+            if !isArticle, !pictures.isEmpty {
+                FeedImageGrid(pictures: pictures, source: entity)
             }
             if let source = entity.forwardSource {
                 ForwardedFeedView(entity: source, zoomSourceID: "\(entity.id.uuidString)#forward")
@@ -352,15 +353,27 @@ struct FeedTagRow: View {
     var body: some View {
         let items = chips
         if !items.isEmpty {
-            // 放得下就直接排开：每个横向滚动视图背后都是一个系统滚动视图，列表里很重。
-            ViewThatFits(in: .horizontal) {
+            // 绝大多数动态只有 1～2 个标签，直接横排避免 ViewThatFits 每次双倍测算以及为卡片创建横向滚动视图。
+            if items.count <= 2 {
                 row(items)
+            } else {
                 ScrollView(.horizontal, showsIndicators: false) { row(items) }
             }
         }
     }
 
     private func row(_ items: [(title: String, url: String, logo: String)]) -> some View {
+        #if os(macOS)
+        // macOS 将同一行话题胶囊合并到单个 GlassEffectContainer，保留 Liquid Glass 观感并减少玻璃合成层数。
+        GlassEffectContainer(spacing: 6) {
+            chipsStack(items)
+        }
+        #else
+        chipsStack(items)
+        #endif
+    }
+
+    private func chipsStack(_ items: [(title: String, url: String, logo: String)]) -> some View {
         HStack(spacing: 6) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, chip in
                 let chipZoomID = "\(zoomPrefix)\(entity.id.uuidString)#tag-\(index)"
@@ -435,43 +448,47 @@ struct FeedCounters: View {
 
     var body: some View {
         GlassEffectContainer(spacing: 8) {
-            HStack(spacing: 8) {
-                Button(action: toggleLike) {
-                    GlassCounterLabel(text: Formatting.count(likeCount),
-                                      systemImage: liked ? "hand.thumbsup.fill" : "hand.thumbsup", isActive: liked)
+            counterRow
+        }
+    }
+
+    private var counterRow: some View {
+        HStack(spacing: 8) {
+            Button(action: toggleLike) {
+                GlassCounterLabel(text: Formatting.count(likeCount),
+                                  systemImage: liked ? "hand.thumbsup.fill" : "hand.thumbsup", isActive: liked)
+            }
+            .buttonStyle(.plain)
+            .disabled(isWorking)
+            .layoutPriority(1)
+            .help(liked ? "取消点赞" : "点赞")
+            .accessibilityLabel(liked ? "取消点赞，\(likeCount)" : "点赞，\(likeCount)")
+            Button {
+                app.remember(entity)
+                navigator.openCard(.feed(id: entity.entityID), zoomID: entity.id.uuidString)
+            } label: {
+                GlassCounterLabel(text: Formatting.count(entity.replyCount), systemImage: "bubble.left")
+            }
+            .buttonStyle(.plain)
+            .layoutPriority(1)
+            .help("查看评论")
+            .accessibilityLabel("评论，\(entity.replyCount)")
+            if entity.forwardCount > 0 {
+                ShareLink(item: URL(string: "https://www.coolapk.com/feed/\(entity.entityID)") ?? URL(fileURLWithPath: "/")) {
+                    GlassCounterLabel(text: Formatting.count(entity.forwardCount), systemImage: "arrowshape.turn.up.right")
                 }
                 .buttonStyle(.plain)
-                .disabled(isWorking)
-                .help(liked ? "取消点赞" : "点赞")
-                .accessibilityLabel(liked ? "取消点赞，\(likeCount)" : "点赞，\(likeCount)")
-                Button {
-                    app.remember(entity)
-                    navigator.openCard(.feed(id: entity.entityID), zoomID: entity.id.uuidString)
-                } label: {
-                    GlassCounterLabel(text: Formatting.count(entity.replyCount), systemImage: "bubble.left")
-                }
-                .buttonStyle(.plain)
-                .help("查看评论")
-                .accessibilityLabel("评论，\(entity.replyCount)")
-                if entity.forwardCount > 0 {
-                    ShareLink(item: URL(string: "https://www.coolapk.com/feed/\(entity.entityID)") ?? URL(fileURLWithPath: "/")) {
-                        GlassCounterLabel(text: Formatting.count(entity.forwardCount), systemImage: "arrowshape.turn.up.right")
-                    }
-                    .buttonStyle(.plain)
-                    .help("分享")
-                }
-                Spacer(minLength: 0)
-                if !entity.infoHTML.isEmpty {
-                    // 放不下就整段不显示，避免被截成半截。
-                    ViewThatFits(in: .horizontal) {
-                        Text(RichText.plainText(entity.infoHTML))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
-                        Color.clear.frame(width: 0, height: 0)
-                    }
-                }
+                .layoutPriority(1)
+                .help("分享")
+            }
+            Spacer(minLength: 4)
+            if !entity.infoHTML.isEmpty {
+                Text(RichText.plainText(entity.infoHTML))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(-1)
             }
         }
     }

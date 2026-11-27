@@ -60,14 +60,14 @@ enum ImageURL {
 final class ImageMemoryCache: @unchecked Sendable {
     private let cache: NSCache<NSString, PlatformImage> = {
         let cache = NSCache<NSString, PlatformImage>()
-        cache.totalCostLimit = 256 * 1024 * 1024
+        cache.totalCostLimit = 140 * 1024 * 1024
         return cache
     }()
 
     func image(for key: String) -> PlatformImage? { cache.object(forKey: key as NSString) }
 
-    func store(_ image: PlatformImage, for key: String) {
-        cache.setObject(image, forKey: key as NSString, cost: Int(image.size.width * image.size.height * 4))
+    func store(_ image: PlatformImage, for key: String, byteCost: Int) {
+        cache.setObject(image, forKey: key as NSString, cost: max(byteCost, 1))
     }
 
     func removeAll() { cache.removeAllObjects() }
@@ -115,10 +115,10 @@ actor ImagePipeline {
         let task = Task<PlatformImage?, Never>(priority: .userInitiated) { [session, memory] in
             guard let (data, response) = try? await session.data(from: url),
                   (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false,
-                  let image = ImagePipeline.decode(data, maxPixel: maxPixel)
+                  let decoded = ImagePipeline.decode(data, maxPixel: maxPixel)
             else { return nil }
-            memory.store(image, for: key)
-            return image
+            memory.store(decoded.image, for: key, byteCost: decoded.byteCost)
+            return decoded.image
         }
         inflight[key] = task
         let image = await task.value
@@ -135,7 +135,7 @@ actor ImagePipeline {
         return data
     }
 
-    private static func decode(_ data: Data, maxPixel: CGFloat?) -> PlatformImage? {
+    private static func decode(_ data: Data, maxPixel: CGFloat?) -> (image: PlatformImage, byteCost: Int)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else {
             return nil
         }
@@ -147,12 +147,17 @@ actor ImagePipeline {
         // 始终在主线程之外解码，同时限制超大原图的尺寸。
         options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel ?? 4096
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return PlatformImage(data: data)
+            guard let fallback = PlatformImage(data: data) else { return nil }
+            return (fallback, max(Int(fallback.size.width * fallback.size.height * 4), data.count))
         }
+        let cost = cgImage.bytesPerRow * cgImage.height
         #if os(macOS)
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        // 按 2x Retina 逻辑尺寸包装 NSImage，同时以真实像素字节数计入内存缓存成本。
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width) / 2,
+                                                           height: CGFloat(cgImage.height) / 2))
+        return (image, cost)
         #else
-        return UIImage(cgImage: cgImage)
+        return (UIImage(cgImage: cgImage), cost)
         #endif
     }
 
@@ -179,11 +184,15 @@ struct RemoteImage: View {
     init(_ raw: String, variant: ImageURL.Variant? = nil, maxPixel: CGFloat? = 1200,
          contentMode: ContentMode = .fill, placeholderSymbol: String = "photo") {
         let original = ImageURL.normalized(raw)
-        url = variant.map { ImageURL.variant(raw, $0) } ?? original
-        fallbackURL = original == url ? nil : original
+        let resolved = variant.map { ImageURL.variant(raw, $0) } ?? original
+        url = resolved
+        fallbackURL = original == resolved ? nil : original
         self.maxPixel = maxPixel
         self.contentMode = contentMode
         self.placeholderSymbol = placeholderSymbol
+        // 已在内存缓存中的图片直接作为初始状态，避免滚动复用时 `.task` 再次赋值 `@State` 触发冗余重算。
+        let initial = resolved.flatMap { ImagePipeline.shared.cached($0, maxPixel: maxPixel) }
+        _image = State(initialValue: initial)
     }
 
     var body: some View {
@@ -196,7 +205,7 @@ struct RemoteImage: View {
                     if let image = image ?? url.flatMap({ ImagePipeline.shared.cached($0, maxPixel: maxPixel) }) {
                         Image(platformImage: image)
                             .resizable()
-                            .interpolation(.high)
+                            .interpolation(.medium)
                             .aspectRatio(contentMode: contentMode)
                     } else {
                         Rectangle()
@@ -215,18 +224,19 @@ struct RemoteImage: View {
             .task(id: url) {
             guard let url else { failed = true; return }
             if let cached = ImagePipeline.shared.cached(url, maxPixel: maxPixel) {
-                image = cached
+                if image !== cached { image = cached }
                 return
             }
-            image = nil
-            failed = false
+            if image != nil { image = nil }
+            if failed { failed = false }
             var loaded = await ImagePipeline.shared.image(for: url, maxPixel: maxPixel)
             if loaded == nil, !Task.isCancelled, let fallbackURL {
                 loaded = await ImagePipeline.shared.image(for: fallbackURL, maxPixel: maxPixel)
             }
             guard !Task.isCancelled else { return }
             if let loaded {
-                withAnimation(.easeOut(duration: 0.15)) { image = loaded }
+                // 滚动时大量缩略图并发落位，直接赋值避免同时触发几十个隐式动画事务导致掉帧。
+                image = loaded
             } else {
                 failed = true
             }

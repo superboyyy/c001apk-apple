@@ -30,6 +30,8 @@ final class PagedList {
     private(set) var moreError: APIError?
     private(set) var needsSilentRefresh = false
     private(set) var resetCount = 0
+    /// 仅在刷新、重置或顶部插入时递增（翻页追加不变），供列表卡片做 O(1) 判等跳过已有卡片重算。
+    private(set) var contentRevision = 0
 
     @ObservationIgnored private let fetch: Fetch
     @ObservationIgnored private let cacheKey: String?
@@ -88,6 +90,7 @@ final class PagedList {
         needsSilentRefresh = false
         restoreFromCache()
         resetCount &+= 1
+        contentRevision &+= 1
     }
 
     /// - Parameters:
@@ -147,6 +150,7 @@ final class PagedList {
                     withAnimation(.smooth(duration: 0.25)) {
                         items = incoming
                         phase = .loaded
+                        contentRevision &+= 1
                     }
                 }
             } else {
@@ -156,6 +160,7 @@ final class PagedList {
                 lastItem = result.lastItem ?? incoming.last(where: { !$0.entityID.isEmpty })?.entityID
                 reachedEnd = nextReachedEnd
                 items = incoming
+                contentRevision &+= 1
                 if items.isEmpty {
                     phase = .empty
                     reachedEnd = true
@@ -275,6 +280,7 @@ final class PagedList {
 
     func insertAtTop(_ entity: Entity) {
         items.insert(entity, at: 0)
+        contentRevision &+= 1
         if phase == .empty { phase = .loaded }
     }
 }
