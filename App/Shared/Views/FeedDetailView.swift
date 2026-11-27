@@ -7,7 +7,6 @@ struct FeedDetailView: View {
 
     @Environment(AppModel.self) private var app
     @Environment(Navigator.self) private var navigator
-    @Environment(\.isActiveRoute) private var isActiveRoute
 
     @State private var entity: Entity?
     @State private var failure: APIError?
@@ -24,7 +23,27 @@ struct FeedDetailView: View {
     @State private var isSending = false
     @State private var isShowingDeviceIdentity = false
     @FocusState private var composerFocused: Bool
-    @State private var width: CGFloat = 900
+    @State private var width: CGFloat
+
+    init(
+        id: String,
+        initialEntity: Entity? = nil,
+        initialWidth: CGFloat = 0,
+        client: CoolapkClient? = nil
+    ) {
+        self.id = id
+        // 第 0 帧直接带入列表摘要、评论模型与当前容器宽度，避免闪现空白转圈或首帧分栏跳变。
+        _entity = State(initialValue: initialEntity)
+        _width = State(initialValue: initialWidth > 100 ? initialWidth.rounded() : 900)
+        if let client {
+            let defaultSort = CoolapkClient.ReplySort.latestActivity
+            _replies = State(initialValue: PagedList { request in
+                try await client.feedReplies(id: id, sort: defaultSort, fromAuthor: false, page: request.page,
+                                             firstItem: request.firstItem, lastItem: request.lastItem)
+            })
+            _loadedReplyKey = State(initialValue: ReplyKey(sort: defaultSort, authorOnly: false))
+        }
+    }
 
     /// 宽窗口左边看正文、右边看评论；窄窗口则叠成一列。
     private var isSplit: Bool { width >= 900 && entity != nil }
@@ -110,9 +129,16 @@ struct FeedDetailView: View {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width.rounded() } action: { newWidth in
+            if abs(newWidth - width) >= 1 { width = newWidth }
+        }
         .routeTitle(entity.map { $0.messageTitle.isEmpty ? "\($0.username) 的动态" : $0.messageTitle } ?? "动态")
-        .toolbar { toolbar }
+        .modifier(FeedDetailToolbar(id: id, entity: entity) {
+            Task {
+                await load(interactive: true)
+                await replies?.refresh(interactive: true)
+            }
+        })
         .sheet(item: $thread) { root in
             ReplyThreadSheet(root: root) { startReply(to: $0) }
         }
@@ -324,48 +350,7 @@ struct FeedDetailView: View {
         .padding(.top, 8)
     }
 
-    // MARK: 工具栏与输入框
-
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        if isActiveRoute {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task {
-                        await load(interactive: true)
-                        await replies?.refresh(interactive: true)
-                    }
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .help("刷新（⌘R）")
-            }
-            if let entity {
-                ToolbarItem(placement: .primaryAction) {
-                    FeedExportButton(feed: entity)
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button("在浏览器中打开") {
-                        if let url = URL(string: "https://www.coolapk.com/feed/\(id)") { Platform.open(url) }
-                    }
-                    Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(id)") }
-                    if let entity {
-                        Button("拷贝正文") { Platform.copy(FeedBodyView.plainText(of: entity)) }
-                        Divider()
-                        Button("屏蔽 \(entity.username)（仅本机）") {
-                            app.library.block(uid: entity.uid, username: entity.username)
-                            app.showToast("已在本机屏蔽 \(entity.username)")
-                        }
-                    }
-                } label: {
-                    Label("更多", systemImage: "ellipsis")
-                }
-            }
-        }
-    }
+    // MARK: 输入框
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -472,6 +457,53 @@ struct FeedDetailView: View {
                 }
             } catch {
                 app.report(error)
+            }
+        }
+    }
+}
+
+/// 详情页工具栏独立隔离 `isActiveRoute`，避免进出下级页面时触发整页正文与评论重算。
+private struct FeedDetailToolbar: ViewModifier {
+    let id: String
+    let entity: Entity?
+    let onRefresh: () -> Void
+
+    @Environment(AppModel.self) private var app
+    @Environment(\.isActiveRoute) private var isActiveRoute
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if isActiveRoute {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: onRefresh) {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("刷新（⌘R）")
+                }
+                if let entity {
+                    ToolbarItem(placement: .primaryAction) {
+                        FeedExportButton(feed: entity)
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Menu {
+                        Button("在浏览器中打开") {
+                            if let url = URL(string: "https://www.coolapk.com/feed/\(id)") { Platform.open(url) }
+                        }
+                        Button("拷贝链接") { Platform.copy("https://www.coolapk.com/feed/\(id)") }
+                        if let entity {
+                            Button("拷贝正文") { Platform.copy(FeedBodyView.plainText(of: entity)) }
+                            Divider()
+                            Button("屏蔽 \(entity.username)（仅本机）") {
+                                app.library.block(uid: entity.uid, username: entity.username)
+                                app.showToast("已在本机屏蔽 \(entity.username)")
+                            }
+                        }
+                    } label: {
+                        Label("更多", systemImage: "ellipsis")
+                    }
+                }
             }
         }
     }

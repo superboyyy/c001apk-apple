@@ -103,6 +103,9 @@ struct RootView: View {
                     }
             }
             .environment(\.zoomNamespace, zoomNamespace)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                navigator.detailFrame = frame
+            }
             #endif
         }
         // 整个窗口共用一层背景，作为窗口自身的背景绘制，
@@ -124,11 +127,13 @@ struct RootView: View {
             .animation(.smooth(duration: 0.25), value: isRailVisible)
         }
         .overlay(alignment: .bottom) {
-            if let toast = app.toast {
-                ToastView(toast: toast).id(toast.id)
+            ZStack {
+                if let toast = app.toast {
+                    ToastView(toast: toast).id(toast.id)
+                }
             }
+            .animation(.smooth(duration: 0.25), value: app.toast)
         }
-        .animation(.smooth(duration: 0.25), value: app.toast)
         // 发布 / 回复编辑器浮在整个窗口之上（不能用 sheet，否则会挡住登录和人机验证）。
         .composer($app.composeTarget) { _, created in
             app.composeCompletion?(created)
@@ -374,25 +379,12 @@ private struct SidebarRootView: View {
     let item: SidebarItem
 
     @Environment(AppModel.self) private var app
-    @Environment(\.isActiveRoute) private var isActiveRoute
 
     var body: some View {
         switch item {
         case .home:
             EntityListView(model: homeModel)
-                .toolbar {
-                    if isActiveRoute {
-                        ToolbarItem(placement: .primaryAction) {
-                            Button {
-                                app.compose(.feed()) { _ in app.showToast("已发布") }
-                            } label: {
-                                Label("发布动态", systemImage: "square.and.pencil")
-                            }
-                            .keyboardShortcut("n", modifiers: .command)
-                            .help("发布动态（⌘N）")
-                        }
-                    }
-                }
+                .modifier(HomeComposeToolbar())
         case .hot:
             EntityListView(model: page("hot", url: "/page?url=V9_HOME_TAB_RANKING", title: "热榜"))
         case .following:
@@ -449,14 +441,45 @@ private struct SidebarRootView: View {
     }
 }
 
+/// 首页发布按钮独立隔离 `isActiveRoute`，避免打开/关闭帖子时触发整个首页容器重算。
+private struct HomeComposeToolbar: ViewModifier {
+    @Environment(AppModel.self) private var app
+    @Environment(\.isActiveRoute) private var isActiveRoute
+
+    func body(content: Content) -> some View {
+        content.toolbar {
+            if isActiveRoute {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        app.compose(.feed()) { _ in app.showToast("已发布") }
+                    } label: {
+                        Label("发布动态", systemImage: "square.and.pencil")
+                    }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .help("发布动态（⌘N）")
+                }
+            }
+        }
+    }
+}
+
 /// 导航栈推入的目的地。
 struct RouteView: View {
     let route: Route
 
+    @Environment(AppModel.self) private var app
+    @Environment(Navigator.self) private var navigator
+
     var body: some View {
+        let initialWidth = navigator.detailFrame.width
         switch route {
         case .feed(let id):
-            FeedDetailView(id: id)
+            FeedDetailView(
+                id: id,
+                initialEntity: app.preview(feed: id),
+                initialWidth: initialWidth,
+                client: app.client
+            )
         case .user(let key):
             UserView(key: key)
         case .topic(let tag):
@@ -466,9 +489,9 @@ struct RouteView: View {
         case .app(let key):
             AppDetailView(key: key)
         case .page(let url, let title):
-            RemoteListView(source: .page(url: url), title: title)
+            RemoteListView(source: .page(url: url), title: title, client: app.client)
         case .list(let path, let title):
-            RemoteListView(source: .path(path), title: title)
+            RemoteListView(source: .path(path), title: title, client: app.client)
         case .search(let keyword):
             SearchView(initialKeyword: keyword)
         case .chat(let peer):
@@ -491,6 +514,34 @@ private struct RemoteListView: View {
     @State private var model: PagedList?
     @State private var loadedSource: Source?
 
+    init(source: Source, title: String, client: CoolapkClient? = nil) {
+        self.source = source
+        self.title = title
+        if let client {
+            _model = State(initialValue: Self.makeList(source: source, title: title, client: client))
+            _loadedSource = State(initialValue: source)
+        }
+    }
+
+    private static func makeList(
+        source: Source,
+        title: String,
+        client: CoolapkClient
+    ) -> PagedList {
+        switch source {
+        case .page(let url):
+            return PagedList { request in
+                try await client.dataList(url: url, title: title, page: request.page,
+                                          firstItem: request.firstItem, lastItem: request.lastItem)
+            }
+        case .path(let path):
+            return PagedList { request in
+                try await client.list(path: path, page: request.page,
+                                      firstItem: request.firstItem, lastItem: request.lastItem)
+            }
+        }
+    }
+
     var body: some View {
         Group {
             if let model {
@@ -504,20 +555,7 @@ private struct RemoteListView: View {
             // 从列表点进帖子再返回时，保留原列表数据与滚动位置。
             guard loadedSource != source || model == nil else { return }
             loadedSource = source
-            let client = app.client
-            let title = title
-            switch source {
-            case .page(let url):
-                model = PagedList { request in
-                    try await client.dataList(url: url, title: title, page: request.page,
-                                              firstItem: request.firstItem, lastItem: request.lastItem)
-                }
-            case .path(let path):
-                model = PagedList { request in
-                    try await client.list(path: path, page: request.page,
-                                          firstItem: request.firstItem, lastItem: request.lastItem)
-                }
-            }
+            model = Self.makeList(source: source, title: title, client: app.client)
         }
     }
 }

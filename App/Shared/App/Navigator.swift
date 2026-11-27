@@ -69,7 +69,7 @@ final class Navigator {
     #endif
     /// 由工具栏搜索框或菜单命令设置。
     var pendingSearch: String?
-    /// 详情区域在窗口坐标系里的矩形，用于计算 macOS 卡片点击的动画锚点。
+    /// 详情区域在窗口坐标系里的矩形，供详情页与瀑布流首帧初始化布局宽度。
     @ObservationIgnored var detailFrame: CGRect = .zero
 
     var currentEntries: [NavigationEntry] {
@@ -88,14 +88,10 @@ final class Navigator {
 
     func select(_ item: SidebarItem) {
         guard selection != item else { return }
-        #if os(macOS)
-        withAnimation(RouteMotion.tab) { selection = item }
-        #else
         selection = item
-        #endif
     }
 
-    func push(_ route: Route, zoomID: String? = nil, origin: UnitPoint? = nil) {
+    func push(_ route: Route, zoomID: String? = nil) {
         #if !os(macOS)
         // 若系统弹栈与镜像数组短暂不同步，先按真实 NavigationPath 长度对齐，避免误判“已在栈顶”而点不开。
         let activeCount = navigationPaths[selection]?.count ?? 0
@@ -105,13 +101,10 @@ final class Navigator {
         }
         #endif
         if currentEntries.last?.route == route { return }
-        let resolvedOrigin = origin ?? ClickOrigin.current(in: detailFrame)
         let normalizedZoomID = zoomID.flatMap { $0.isEmpty ? nil : $0 }
-        let entry = NavigationEntry(route: route, origin: resolvedOrigin, zoomID: normalizedZoomID)
-        #if os(macOS)
-        withAnimation(RouteMotion.open) { currentEntries.append(entry) }
-        #else
+        let entry = NavigationEntry(route: route, zoomID: normalizedZoomID)
         currentEntries.append(entry)
+        #if !os(macOS)
         var path = navigationPaths[selection] ?? NavigationPath()
         if let normalizedZoomID {
             path.append(ZoomedNavigationEntry(id: entry.id, route: route, zoomID: normalizedZoomID))
@@ -130,14 +123,22 @@ final class Navigator {
 
     func noteLinkActivated() { lastLinkActivation = Date() }
 
+    private static var cardActivationDelay: TimeInterval {
+        #if os(macOS)
+        // macOS 上链接点击会在同一轮或下一拍立刻触发 openURL，16ms 既可可靠避让又无拖滞感。
+        0.016
+        #else
+        0.04
+        #endif
+    }
+
     func openCard(_ route: Route, zoomID: String? = nil) {
         let now = Date()
         guard now.timeIntervalSince(lastCardActivation) > 0.08 else { return }
         lastCardActivation = now
-        let capturedOrigin = ClickOrigin.current(in: detailFrame)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cardActivationDelay) { [self] in
             guard Date().timeIntervalSince(lastLinkActivation) > 0.35 else { return }
-            push(route, zoomID: zoomID, origin: capturedOrigin)
+            push(route, zoomID: zoomID)
         }
     }
 
@@ -145,19 +146,16 @@ final class Navigator {
         let now = Date()
         guard now.timeIntervalSince(lastCardActivation) > 0.08 else { return }
         lastCardActivation = now
-        let capturedOrigin = ClickOrigin.current(in: detailFrame)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.cardActivationDelay) { [self] in
             guard Date().timeIntervalSince(lastLinkActivation) > 0.35 else { return }
-            open(link, title: title, app: app, zoomID: zoomID, origin: capturedOrigin)
+            open(link, title: title, app: app, zoomID: zoomID)
         }
     }
 
     func pop() {
         guard !currentEntries.isEmpty else { return }
-        #if os(macOS)
-        withAnimation(RouteMotion.close) { _ = currentEntries.removeLast() }
-        #else
         currentEntries.removeLast()
+        #if !os(macOS)
         if var path = navigationPaths[selection], !path.isEmpty {
             path.removeLast()
             navigationPaths[selection] = path
@@ -167,19 +165,17 @@ final class Navigator {
 
     func popToRoot() {
         guard !currentEntries.isEmpty else { return }
-        #if os(macOS)
-        withAnimation(RouteMotion.close) { currentEntries.removeAll() }
-        #else
         currentEntries.removeAll()
+        #if !os(macOS)
         navigationPaths[selection] = NavigationPath()
         #endif
     }
 
     /// 按链接类型打开酷安链接：应用内页面、图片查看器或浏览器。
-    func open(_ link: String, title: String? = nil, app: AppModel, zoomID: String? = nil, origin: UnitPoint? = nil) {
+    func open(_ link: String, title: String? = nil, app: AppModel, zoomID: String? = nil) {
         switch LinkRouter.resolve(link, title: title) {
         case .route(let route):
-            push(route, zoomID: zoomID, origin: origin)
+            push(route, zoomID: zoomID)
         case .image(let url):
             ImageViewer.show(urls: [url], index: 0)
         case .external(let url):
