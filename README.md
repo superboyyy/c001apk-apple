@@ -4,6 +4,8 @@
 
 协议实现移植自 [c001apk](https://github.com/TG-Twilight/c001apk)。本项目与酷安官方无关。
 
+![酷果 macOS 主界面](docs/screenshots/macos-home.jpg)
+
 ## 功能
 
 - 头条、热榜、酷图、话题、数码，瀑布流信息流
