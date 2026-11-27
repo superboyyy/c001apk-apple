@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coolapk-kit-tests:
+    name: CoolapkKit Tests
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run Unit Tests
+        working-directory: Packages/CoolapkKit
+        run: swift test
+
+  build-apps:
+    name: Build macOS & iPadOS
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Toolchain
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build c001apk-macOS
+        run: |
+          xcodebuild \
+            -project c001apk.xcodeproj \
+            -scheme c001apk-macOS \
+            -destination 'platform=macOS' \
+            -derivedDataPath build/DerivedData-macOS \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Build c001apk-iPadOS
+        run: |
+          xcodebuild \
+            -project c001apk.xcodeproj \
+            -scheme c001apk-iPadOS \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData-iPadOS \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
