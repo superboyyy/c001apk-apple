@@ -184,8 +184,17 @@ private struct AdaptiveGridLayout: Layout {
 struct CarouselCard: View {
     let entity: Entity
 
+    @Environment(\.isActiveRoute) private var isActiveRoute
     @State private var index = 0
     @State private var hovering = false
+    /// 手动翻页后重置自动轮播计时，避免刚切完立刻跳走。
+    @State private var manualTick = 0
+
+    private struct AutoAdvanceKey: Equatable {
+        let count: Int
+        let tick: Int
+        let active: Bool
+    }
 
     var body: some View {
         let items = entity.entities.filter { !$0.pic.isEmpty }
@@ -193,37 +202,30 @@ struct CarouselCard: View {
             let safeIndex = min(index, items.count - 1)
             let current = items[safeIndex]
             let pixel = ImageURL.pixelSize(current.pic) ?? CGSize(width: 1080, height: 240)
+            let ratio = min(max(pixel.width / pixel.height, 2.4), 5)
             // 使用不随自动轮播下标变化的稳定 ID，防止返回时轮播已切页导致收起动画找不到锚点。
             let carouselZoomID = "\(entity.id.uuidString)#carousel"
-            CardLink(url: current.url, title: current.title,
-                     zoomID: carouselZoomID, cornerRadius: 16, appliesZoomSource: false) {
-                Color.clear
-                    .aspectRatio(min(max(pixel.width / pixel.height, 2.4), 5), contentMode: .fit)
-                    .overlay { RemoteImage(current.pic, maxPixel: 1800).id(current.pic) }
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .overlay(alignment: .bottomTrailing) {
+            // 用 ZStack 把横幅链接与翻页控件拆成同级兄弟视图，避免翻页按钮挂在 Button 的 overlay 内导致点击穿透打开横幅。
+            ZStack(alignment: .bottomTrailing) {
+                CardLink(url: current.url, title: current.title,
+                         zoomID: carouselZoomID, cornerRadius: 16, appliesZoomSource: false) {
+                    Color.clear
+                        .aspectRatio(ratio, contentMode: .fit)
+                        .overlay { RemoteImage(current.pic, maxPixel: 1800).id(current.pic) }
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
                 if items.count > 1 {
-                    GlassEffectContainer(spacing: 6) {
-                        HStack(spacing: 6) {
-                            pager("chevron.left", "上一张") { index = (index - 1 + items.count) % items.count }
-                            Text("\(min(index, items.count - 1) + 1)/\(items.count)")
-                                .font(.system(size: 11, weight: .medium).monospacedDigit())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .glassEffect(.regular, in: .capsule)
-                            pager("chevron.right", "下一张") { index = (index + 1) % items.count }
-                        }
-                    }
-                    .padding(10)
+                    pagerBar(count: items.count, currentIndex: safeIndex)
                 }
             }
             // 避免横幅占满页面：最高 190pt。
-            .frame(maxWidth: min(1280, 190 * min(max(pixel.width / pixel.height, 2.4), 5)))
+            .frame(maxWidth: min(1280, 190 * ratio))
             .zoomTransitionSource(id: carouselZoomID, cornerRadius: 16)
             .onHover { hovering = $0 }
-            .task(id: items.count) {
-                // 自动轮播，指针停在横幅上时暂停。
+            .task(id: AutoAdvanceKey(count: items.count, tick: manualTick, active: isActiveRoute)) {
+                // 仅当前可见页自动轮播，被详情页遮挡或指针停在横幅上时暂停，避免后台无意义刷新。
+                guard isActiveRoute else { return }
                 while !Task.isCancelled, items.count > 1 {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                     if !hovering, !Task.isCancelled {
@@ -235,13 +237,61 @@ struct CarouselCard: View {
         }
     }
 
-    private func pager(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
-        Button {
-            withAnimation(.smooth) { action() }
-        } label: {
+    private func step(by delta: Int, count: Int) {
+        guard count > 1 else { return }
+        manualTick &+= 1
+        withAnimation(.smooth) {
+            index = (index + delta + count) % count
+        }
+    }
+
+    private func pagerBar(count: Int, currentIndex: Int) -> some View {
+        #if os(macOS)
+        let buttonSize: CGFloat = 28
+        let iconSize: CGFloat = 12
+        let counterFontSize: CGFloat = 12
+        let spacing: CGFloat = 6
+        let outerPadding: CGFloat = 10
+        #else
+        let buttonSize: CGFloat = 38
+        let iconSize: CGFloat = 15
+        let counterFontSize: CGFloat = 13
+        let spacing: CGFloat = 8
+        let outerPadding: CGFloat = 12
+        #endif
+
+        return GlassEffectContainer(spacing: spacing) {
+            HStack(spacing: spacing) {
+                pager("chevron.left", "上一张", size: buttonSize, iconSize: iconSize) {
+                    step(by: -1, count: count)
+                }
+                Text("\(currentIndex + 1)/\(count)")
+                    .font(.system(size: counterFontSize, weight: .medium).monospacedDigit())
+                    .padding(.horizontal, buttonSize * 0.3)
+                    .frame(minHeight: buttonSize)
+                    .contentShape(Capsule())
+                    .glassEffect(.regular, in: .capsule)
+                    .onTapGesture {}
+                pager("chevron.right", "下一张", size: buttonSize, iconSize: iconSize) {
+                    step(by: 1, count: count)
+                }
+            }
+        }
+        .padding(4)
+        .background {
+            // 吸收按钮间隙与边缘的误触，避免穿透打开底层轮播链接。
+            Color.clear
+                .contentShape(Capsule())
+                .onTapGesture {}
+        }
+        .padding(outerPadding - 4)
+    }
+
+    private func pager(_ symbol: String, _ label: String, size: CGFloat, iconSize: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 24, height: 24)
+                .font(.system(size: iconSize, weight: .semibold))
+                .frame(width: size, height: size)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -289,38 +339,50 @@ struct IconScrollCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CardTitle(entity: entity)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    // 不包在 GlassEffectContainer 内：容器会把子项的 `.glassEffect` 合并进统一 SDFLayer，
-                    // 吞掉子项上的 `.matchedTransitionSource`，导致 iPadOS 缩放过渡退化为从屏幕中央打开。
-                    HStack(spacing: 8) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
-                            let title = item.title.isEmpty ? item.username : item.title
-                            let picture = [item.logo, item.pic, item.userAvatar].first { !$0.isEmpty } ?? ""
-                            let url = item.url.isEmpty && item.entityType == "user" ? "/u/\(item.uid)" : item.url
-                            let chipZoomID = "\(entity.id.uuidString)#chip-\(offset)"
-                            CardLink(url: url, title: title,
-                                     zoomID: chipZoomID, cornerRadius: 20, appliesZoomSource: false) {
-                                HStack(spacing: 8) {
-                                    RemoteImage(picture, maxPixel: 120)
-                                        .frame(width: 28, height: 28)
-                                        .clipShape(RoundedRectangle(cornerRadius: item.entityType == "user" ? 14 : 7, style: .continuous))
-                                    Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
-                                }
-                                .padding(.leading, 7)
-                                .padding(.trailing, 13)
-                                .padding(.vertical, 6)
-                                .contentShape(Capsule())
-                            }
-                            .glassChip()
-                            .zoomTransitionSource(id: chipZoomID, cornerRadius: 20)
-                        }
+                    #if os(macOS)
+                    // macOS 不走 matchedTransitionSource，用 GlassEffectContainer 将整排标签合并成单个玻璃合成层，
+                    // 保留 Liquid Glass 质感的同时大幅降低 WindowServer 开销。
+                    GlassEffectContainer(spacing: 8) {
+                        chipRow(items)
                     }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 2)
+                    #else
+                    // iPadOS 不包在 GlassEffectContainer 内：容器会把子项的 `.glassEffect` 合并进统一 SDFLayer，
+                    // 吞掉子项上的 `.matchedTransitionSource`，导致缩放过渡退化为从屏幕中央打开。
+                    chipRow(items)
+                    #endif
                 }
                 .scrollClipDisabled()
             }
             .padding(.horizontal, 4)
         }
+    }
+
+    private func chipRow(_ items: [Entity]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                let title = item.title.isEmpty ? item.username : item.title
+                let picture = [item.logo, item.pic, item.userAvatar].first { !$0.isEmpty } ?? ""
+                let url = item.url.isEmpty && item.entityType == "user" ? "/u/\(item.uid)" : item.url
+                let chipZoomID = "\(entity.id.uuidString)#chip-\(offset)"
+                CardLink(url: url, title: title,
+                         zoomID: chipZoomID, cornerRadius: 20, appliesZoomSource: false) {
+                    HStack(spacing: 8) {
+                        RemoteImage(picture, maxPixel: 120)
+                            .frame(width: 28, height: 28)
+                            .clipShape(RoundedRectangle(cornerRadius: item.entityType == "user" ? 14 : 7, style: .continuous))
+                        Text(title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
+                    }
+                    .padding(.leading, 7)
+                    .padding(.trailing, 13)
+                    .padding(.vertical, 6)
+                    .contentShape(Capsule())
+                }
+                .glassChip()
+                .zoomTransitionSource(id: chipZoomID, cornerRadius: 20)
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 2)
     }
 }
 

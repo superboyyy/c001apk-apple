@@ -101,8 +101,14 @@ private final class ImageViewerViewController: UIViewController,
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("不支持从归档创建") }
 
+    override var canBecomeFirstResponder: Bool { true }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
     override var prefersStatusBarHidden: Bool { !chromeVisible }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
