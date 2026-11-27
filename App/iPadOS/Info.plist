@@ -36,6 +36,8 @@
 	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.social-networking</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于在系统分享菜单中将图片保存到“照片”图库。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

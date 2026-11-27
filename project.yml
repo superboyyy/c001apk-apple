@@ -89,6 +89,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.social-networking
+        NSPhotoLibraryAddUsageDescription: 用于在系统分享菜单中将图片保存到“照片”图库。
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
