@@ -14,9 +14,29 @@ final class ContentFilterTests: XCTestCase {
         FilterRule(id: "personal.one", reason: "个人", kind: .text, groups: [["个人屏蔽词"]])
     }
 
+    private let sampleUID = "10001"
+    private let sampleTopicID = "999999"
+    private let sampleTopicName = "测试话题"
+    private let samplePhrase = "合成违禁短语"
+
+    private func sampleRules() -> [FilterRule] {
+        [
+            FilterRule(id: "topic.sample", reason: "测试话题规则", kind: .topic, values: [sampleTopicID, sampleTopicName]),
+            FilterRule(id: "author.sample", reason: "测试作者规则", kind: .author, values: [sampleUID]),
+            FilterRule(id: "text.sample", reason: "测试文本规则", kind: .text, scopes: [.feed, .comment], groups: [[samplePhrase]]),
+        ]
+    }
+
     private func enabled() -> ContentFilter {
         var filter = ContentFilter()
         filter.setEnabled(true)
+        return filter
+    }
+
+    private func enabledWithSampleRules() throws -> ContentFilter {
+        var filter = enabled()
+        try filter.setSubscriptionURL(subscriptionURL)
+        try filter.applySubscription(subscription(2, sampleRules()), now: now)
         return filter
     }
 
@@ -33,11 +53,13 @@ final class ContentFilterTests: XCTestCase {
         var filter = ContentFilter()
         XCTAssertFalse(filter.isEnabled)
         XCTAssertEqual(filter.subscriptionURL, "")
-        XCTAssertNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "1007278")))
+        XCTAssertTrue(filter.ruleSet.rules.isEmpty)
+        try filter.addPersonalRule(personal())
+        XCTAssertNil(filter.evaluate(FilterInput(scope: .feed, text: "个人屏蔽词")))
         XCTAssertFalse(filter.isUpdateDue(now: now))
         filter.setEnabled(true)
         XCTAssertEqual(filter.level, .standard)
-        XCTAssertNotNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "1007278")))
+        XCTAssertNotNil(filter.evaluate(FilterInput(scope: .feed, text: "个人屏蔽词")))
         XCTAssertFalse(filter.isUpdateDue(now: now), "没有订阅地址就不联网")
         filter.setLevel(.strict)
         let copy = try restored(filter)
@@ -70,9 +92,8 @@ final class ContentFilterTests: XCTestCase {
         try filter.setAuthorAllowed("456", true)
         try filter.setContentAllowed("feed:7", true)
         XCTAssertNotNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "123")))
-        XCTAssertNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "1007278")), "内置规则已被整体替换")
         try filter.applySubscription(subscription(3), now: now)
-        XCTAssertNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "123")))
+        XCTAssertNil(filter.evaluate(FilterInput(scope: .feed, authorUID: "123")), "新版订阅已整体替换旧规则")
         XCTAssertNotNil(filter.evaluate(FilterInput(scope: .comment, text: "个人屏蔽词")))
 
         var copy = try restored(filter)
@@ -203,15 +224,15 @@ final class ContentFilterTests: XCTestCase {
     }
 
     func testExceptionsAreBoundedAndReversible() throws {
-        var filter = enabled()
-        let input = FilterInput(scope: .feed, id: "9", authorUID: "1007278")
+        var filter = try enabledWithSampleRules()
+        let input = FilterInput(scope: .feed, id: "9", authorUID: sampleUID)
         XCTAssertNotNil(filter.evaluate(input))
         try filter.setContentAllowed("feed:9", true)
         XCTAssertNil(filter.evaluate(input))
         try filter.setContentAllowed("feed:9", false)
-        try filter.setAuthorAllowed("1007278", true)
+        try filter.setAuthorAllowed(sampleUID, true)
         XCTAssertNil(filter.evaluate(input))
-        try filter.setAuthorAllowed("1007278", false)
+        try filter.setAuthorAllowed(sampleUID, false)
         XCTAssertNotNil(filter.evaluate(input))
         XCTAssertThrowsError(try filter.setAuthorAllowed("", true))
         XCTAssertThrowsError(try filter.setContentAllowed(String(repeating: "x", count: 201), true))
@@ -235,23 +256,23 @@ final class ContentFilterTests: XCTestCase {
     // MARK: 列表行
 
     func testTopicMetadataUsesWholeNamesAndIDs() throws {
-        let filter = enabled()
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","tags":"我在酷安晒女友"}"#)))
-        XCTAssertNotNil(filter.match(try entity(##"{"entityType":"feed","tags":"#摄影#,#我在酷安晒女友#"}"##)))
-        XCTAssertNil(filter.match(try entity(#"{"entityType":"feed","tags":"我在酷安晒女友的手机"}"#)))
+        let filter = try enabledWithSampleRules()
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","tags":"测试话题"}"#)))
+        XCTAssertNotNil(filter.match(try entity(##"{"entityType":"feed","tags":"#摄影#,#测试话题#"}"##)))
+        XCTAssertNil(filter.match(try entity(#"{"entityType":"feed","tags":"测试话题的讨论"}"#)))
         XCTAssertNotNil(filter.match(try entity(
-            #"{"entityType":"feed","relationRows":[{"id":110066,"entityType":"topic"}]}"#)))
+            #"{"entityType":"feed","relationRows":[{"id":999999,"entityType":"topic"}]}"#)))
         XCTAssertNotNil(filter.match(try entity(
-            #"{"entityType":"feed","targetRow":{"id":110066,"entityType":"feedTarget","url":"/t/%E8%AF%9D%E9%A2%98"}}"#)))
+            #"{"entityType":"feed","targetRow":{"id":999999,"entityType":"feedTarget","url":"/t/%E8%AF%9D%E9%A2%98"}}"#)))
         XCTAssertNil(filter.match(try entity(
-            #"{"entityType":"feed","targetRow":{"id":110066,"entityType":"product","url":"/product/110066"}}"#)))
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","ttitle":"我在酷安晒女友"}"#)))
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"topic","id":110066,"title":"别的名字"}"#)))
+            #"{"entityType":"feed","targetRow":{"id":999999,"entityType":"product","url":"/product/999999"}}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","ttitle":"测试话题"}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"topic","id":999999,"title":"别的名字"}"#)))
     }
 
     func testTopicLinksInBodyCountButOnlyOnCoolapk() throws {
-        let filter = enabled()
-        let encoded = "%E6%88%91%E5%9C%A8%E9%85%B7%E5%AE%89%E6%99%92%E5%A5%B3%E5%8F%8B"
+        let filter = try enabledWithSampleRules()
+        let encoded = "%E6%B5%8B%E8%AF%95%E8%AF%9D%E9%A2%98"
         func feed(_ href: String, label: String = "#话题#") throws -> Entity {
             let message = "看看<a class=\"feed-link-tag\" href=\"\(href)\">\(label)</a>"
             let data = try JSONSerialization.data(withJSONObject: ["entityType": "feed", "message": message])
@@ -259,7 +280,7 @@ final class ContentFilterTests: XCTestCase {
         }
         XCTAssertNotNil(filter.match(try feed("/t/\(encoded)?type=0")))
         XCTAssertNotNil(filter.match(try feed("https://www.coolapk.com/t/\(encoded)")))
-        XCTAssertNotNil(filter.match(try feed("/t/123", label: "#我在酷安晒女友#")))
+        XCTAssertNotNil(filter.match(try feed("/t/123", label: "#测试话题#")))
         XCTAssertNil(filter.match(try feed("https://example.com/t/\(encoded)")))
         XCTAssertNil(filter.match(try feed("/u/\(encoded)")))
         XCTAssertEqual(ContentFilterProjection.topicTag(inHref: "//m.coolapk.com/t/abc#x"), "abc")
@@ -267,70 +288,70 @@ final class ContentFilterTests: XCTestCase {
     }
 
     func testRepliesAreJudgedOnTheirOwn() throws {
-        let filter = enabled()
+        let filter = try enabledWithSampleRules()
         let parent = try entity(#"""
         {"entityType":"feed","id":1,"uid":7,"message":"刷机方法",
-         "replyRows":[{"entityType":"feed_reply","id":2,"uid":1007278,"message":"hello"}]}
+         "replyRows":[{"entityType":"feed_reply","id":2,"uid":10001,"message":"hello"}]}
         """#)
         XCTAssertNil(filter.match(parent))
         XCTAssertNotNil(filter.match(try XCTUnwrap(parent.replyRows.first)))
         XCTAssertNil(filter.match(try entity(
-            #"{"entityType":"feed_reply","uid":8,"ruid":1007278,"message":"感谢分享"}"#)))
+            #"{"entityType":"feed_reply","uid":8,"ruid":10001,"message":"感谢分享"}"#)))
     }
 
     func testQuotedTextDoesNotLabelTheReply() throws {
-        let filter = enabled()
-        for message in ["<blockquote>想操她</blockquote>请不要这样说", "> 想操她\n\n请文明讨论", "> > 想操她\n\n请文明讨论",
-                        "[quote=某人]想操她[/quote]请文明讨论", "<div class=\"x feed-quote\">想操她</div>请文明讨论",
-                        "<blockquote><a href=\"/t/我在酷安晒女友\">#我在酷安晒女友#</a></blockquote>讨论过滤功能"] {
+        let filter = try enabledWithSampleRules()
+        for message in ["<blockquote>\(samplePhrase)</blockquote>请不要这样说", "> \(samplePhrase)\n\n请文明讨论", "> > \(samplePhrase)\n\n请文明讨论",
+                        "[quote=某人]\(samplePhrase)[/quote]请文明讨论", "<div class=\"x feed-quote\">\(samplePhrase)</div>请文明讨论",
+                        "<blockquote><a href=\"/t/测试话题\">#测试话题#</a></blockquote>讨论过滤功能"] {
             let data = try JSONSerialization.data(withJSONObject: ["entityType": "feed_reply", "uid": 8, "message": message])
             XCTAssertNil(filter.match(Entity(try XCTUnwrap(JSON.parse(data)))), message)
         }
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed_reply","uid":8,"message":"想操她"}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed_reply","uid":8,"message":"合成违禁短语"}"#)))
         XCTAssertEqual(ContentFilterProjection.withoutQuotes("a &amp; b<blockquote>引用</blockquote><br>c"),
                        "a &amp; b<br>c")
     }
 
     func testOnlyFeedsCommentsAndUsersAreInScope() throws {
-        let filter = enabled()
-        XCTAssertNil(filter.match(try entity(#"{"entityType":"notification","uid":1007278,"message":"想操她"}"#)))
-        XCTAssertNil(filter.match(try entity(#"{"entityType":"message","uid":1007278,"message":"想操她"}"#)))
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"user","uid":1007278}"#)))
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"contacts","id":1007278}"#)))
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"notification","uid":1007278}"#), scope: .comment))
+        let filter = try enabledWithSampleRules()
+        XCTAssertNil(filter.match(try entity(#"{"entityType":"notification","uid":10001,"message":"合成违禁短语"}"#)))
+        XCTAssertNil(filter.match(try entity(#"{"entityType":"message","uid":10001,"message":"合成违禁短语"}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"user","uid":10001}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"contacts","id":10001}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"notification","uid":10001}"#), scope: .comment))
         var off = filter
         off.setEnabled(false)
-        XCTAssertNil(off.match(try entity(#"{"entityType":"user","uid":1007278}"#)))
+        XCTAssertNil(off.match(try entity(#"{"entityType":"user","uid":10001}"#)))
     }
 
     func testArticlePartsAndTitlesParticipate() throws {
-        let filter = enabled()
-        for part in [#"{"type":"image","description":"想操她"}"#, #"{"type":"shareUrl","title":"想操她"}"#,
-                     #"{"type":"text","message":"想操她"}"#] {
+        let filter = try enabledWithSampleRules()
+        for part in [#"{"type":"image","description":"合成违禁短语"}"#, #"{"type":"shareUrl","title":"合成违禁短语"}"#,
+                     #"{"type":"text","message":"合成违禁短语"}"#] {
             let data = try JSONSerialization.data(withJSONObject: [
                 "entityType": "feed", "message": "普通摘要", "message_raw_output": "[\(part)]",
             ])
             XCTAssertNotNil(filter.match(Entity(try XCTUnwrap(JSON.parse(data)))), part)
         }
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","message_title":"想操她","message":"正文"}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","message_title":"合成违禁短语","message":"正文"}"#)))
         XCTAssertNil(filter.match(try entity(
-            #"{"entityType":"feed","message":"正文","message_raw_output":"[{\"type\":\"other\",\"message\":\"想操她\"}]"}"#)))
+            #"{"entityType":"feed","message":"正文","message_raw_output":"[{\"type\":\"other\",\"message\":\"合成违禁短语\"}]"}"#)))
         XCTAssertNil(filter.match(try entity(#"{"entityType":"feed","message":"正文","message_raw_output":"{坏的"}"#)))
     }
 
     func testContentKeysFollowScopeAndID() throws {
-        let reply = try entity(#"{"entityType":"feed_reply","id":5,"uid":1007278}"#)
+        let reply = try entity(#"{"entityType":"feed_reply","id":5,"uid":10001}"#)
         XCTAssertEqual(ContentFilterProjection.key(of: reply), "comment:5")
         XCTAssertEqual(ContentFilterProjection.key(of: reply, scope: .feed), "feed:5")
         XCTAssertEqual(ContentFilterProjection.key(of: try entity(#"{"entityType":"user","uid":9}"#)), "user:9")
-        var filter = enabled()
+        var filter = try enabledWithSampleRules()
         XCTAssertNotNil(filter.match(reply))
         try filter.setContentAllowed(ContentFilterProjection.key(of: reply), true)
         XCTAssertNil(filter.match(reply))
-        let user = try entity(#"{"entityType":"user","uid":1007278}"#)
+        let user = try entity(#"{"entityType":"user","uid":10001}"#)
         XCTAssertNotNil(filter.match(user))
         try filter.setContentAllowed(ContentFilterProjection.key(of: user), true)
         XCTAssertNil(filter.match(user), "没有 ID 的用户卡片按 UID 记例外")
-        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","id":6,"uid":1007278}"#)))
+        XCTAssertNotNil(filter.match(try entity(#"{"entityType":"feed","id":6,"uid":10001}"#)))
     }
 }

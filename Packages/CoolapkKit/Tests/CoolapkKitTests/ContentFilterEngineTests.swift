@@ -19,10 +19,38 @@ final class ContentFilterEngineTests: XCTestCase {
         FilterInput(scope: .feed, id: "1", authorUID: uid, text: text, topicIDs: ids, topicNames: names)
     }
 
-    private func builtin() throws -> ContentFilterEngine { try ContentFilterEngine(.builtin) }
+    private func sampleEngine() throws -> ContentFilterEngine {
+        try ContentFilterEngine(rules([
+            FilterRule(
+                id: "text.explicit-solicitation", reason: "测试短语一", kind: .text,
+                scopes: [.feed, .comment],
+                groups: [["想约炮", "求约炮", "来约炮", "一起约炮", "找人约炮", "约炮吗", "约炮么"]],
+                exceptions: ["反对", "拒绝", "不要", "抵制", "警惕", "骚扰", "举报", "困扰"]),
+            FilterRule(
+                id: "text.explicit-objectification", reason: "测试短语二", kind: .text,
+                scopes: [.feed, .comment],
+                groups: [["想操她", "想艹她", "想操这个妹", "想艹这个妹", "想操这女的", "想艹这女的"]],
+                maxDistance: 24),
+            FilterRule(
+                id: "text.strict-suggestive-solicitation", reason: "测试严格短语一", kind: .text,
+                level: .strict, scopes: [.feed, .comment],
+                groups: [["女菩萨"], ["发福利"]],
+                maxDistance: 32),
+            FilterRule(
+                id: "text.strict-comment-spouse-bait", reason: "测试严格短语二", kind: .text,
+                level: .strict, scopes: [.comment],
+                groups: [["叫我老公", "叫声老公", "现在得叫老公"]]),
+        ]))
+    }
+
+    func testBuiltinRuleSetIsEmptyByDefault() throws {
+        XCTAssertTrue(FilterRuleSet.builtin.rules.isEmpty)
+        let engine = try ContentFilterEngine(.builtin)
+        XCTAssertNil(engine.evaluate(feed("普通内容"), level: .strict))
+    }
 
     func testExcludedTermsNeitherMatchNorExempt() throws {
-        let engine = try builtin()
+        let engine = try sampleEngine()
         for text in ["LSP", "lsp", "ＬＳＰ", "手冲", "后入", "性压抑", "本人女，想选手机", "我是女生，健身装机"] {
             XCTAssertNil(engine.evaluate(feed(text), level: .strict), text)
         }
@@ -30,7 +58,7 @@ final class ContentFilterEngineTests: XCTestCase {
     }
 
     func testStrictLevelIncludesStandard() throws {
-        let engine = try builtin()
+        let engine = try sampleEngine()
         XCTAssertNotNil(engine.evaluate(feed("想约炮")))
         XCTAssertNil(engine.evaluate(feed("求 女菩萨 发福利")))
         XCTAssertNotNil(engine.evaluate(feed("求 女菩萨 发福利"), level: .strict))
@@ -39,7 +67,7 @@ final class ContentFilterEngineTests: XCTestCase {
     }
 
     func testOrdinaryContextsDoNotMatch() throws {
-        let engine = try builtin()
+        let engine = try sampleEngine()
         for text in ["求烧鸡做法", "想干掉她的游戏角色", "我想操作她的电脑安装系统", "收到约炮骚扰，该怎么举报",
                      "拒绝别人约炮要求", "我老公用的这款手机"] {
             XCTAssertNil(engine.evaluate(feed(text), level: .strict), text)
@@ -57,14 +85,14 @@ final class ContentFilterEngineTests: XCTestCase {
             let engine = try ContentFilterEngine(rules([textRule(groups: groups)]))
             XCTAssertNil(engine.evaluate(feed(text)), text)
         }
-        let engine = try builtin()
+        let engine = try sampleEngine()
         XCTAssertNotNil(engine.evaluate(feed("手冲，我想约炮")))
         XCTAssertNotNil(engine.evaluate(feed("反对别人约炮骚扰。想操她")))
         XCTAssertNotNil(engine.evaluate(feed("想操作她的电脑。想艹她")))
     }
 
     func testStrictCommentPhrasesOnlyApplyToComments() throws {
-        let engine = try builtin()
+        let engine = try sampleEngine()
         for phrase in ["叫我老公", "叫声老公", "现在得叫老公"] {
             let comment = FilterInput(scope: .comment, text: phrase)
             XCTAssertNil(engine.evaluate(comment))

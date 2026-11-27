@@ -19,7 +19,9 @@ struct ContentFilterSettingsView: View {
             VStack(spacing: 12) {
                 switchCard
                 levelCard
-                categoryCard
+                if !store.filter.ruleSet.rules.isEmpty {
+                    categoryCard
+                }
                 subscriptionCard
                 personalRulesCard
                 allowedAuthorsCard
@@ -138,7 +140,7 @@ struct ContentFilterSettingsView: View {
                 .disabled(store.isUpdating || store.filter.subscriptionURL.isEmpty)
                 Menu("更多") {
                     Button("填入上游规则地址") { subscriptionDraft = ContentFilterStore.upstreamRulesURL }
-                    Button("恢复内置规则") { store.resetToBuiltinRules() }
+                    Button("清空订阅规则") { store.resetToBuiltinRules() }
                 }
                 .menuStyle(.button)
                 .buttonStyle(.glass)
@@ -148,7 +150,7 @@ struct ContentFilterSettingsView: View {
             if let subscriptionError {
                 problem(subscriptionError)
             } else {
-                hint(store.updateMessage ?? "只有保存了订阅地址才会联网；更新失败会继续使用已有规则。订阅整体替换内置规则，不影响个人规则和例外。")
+                hint(store.updateMessage ?? "默认不内置规则；可自行添加下方个人规则，或保存订阅地址后联网拉取规则。更新失败会继续使用已有规则，不影响个人规则和例外。")
             }
         }
         .card()

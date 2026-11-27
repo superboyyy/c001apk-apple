@@ -39,7 +39,7 @@ final class ContentFilterStore {
         } else {
             filter = ContentFilter()
         }
-        if filter.cacheWasDamaged { updateMessage = "规则缓存损坏，已使用内置规则" }
+        if filter.cacheWasDamaged { updateMessage = "规则缓存损坏，已重置为默认规则" }
     }
 
     // MARK: 判断
@@ -117,7 +117,7 @@ final class ContentFilterStore {
 
     func resetToBuiltinRules() {
         update { $0.resetToBuiltinRules() }
-        updateMessage = "已恢复内置规则"
+        updateMessage = "已清空订阅规则"
     }
 
     /// 检查订阅更新。非强制时只在已开启、已配置订阅且距上次成功超过六小时才会请求。
